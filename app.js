@@ -47,7 +47,7 @@ class GrooveEngine {
     this.items = new Map(data.items.map((item) => [item.id, item]));
     this.ticksPerQuarter = data.meta.ticksPerQuarter;
     this.bpm = data.meta.bpm;
-    this.masterLevel = 0.78;
+    this.masterLevel = 0.25;
     this.playing = false;
     this.originTime = 0;
     this.originTick = 0;
@@ -1128,7 +1128,7 @@ function setItemButton(button, category, selected) {
   detail.textContent = item.source;
   button.replaceChildren(name, detail);
   button.dataset.itemId = item.id;
-  button.title = "クリックで一覧／ホイール上下で前後送り／ホイール押し込み中はSOLO";
+  button.title = "クリックで一覧／ホイール上下で前後送り／ホイール押し込み or Alt+クリック中はSOLO";
   return item.id;
 }
 
@@ -1152,6 +1152,7 @@ let heldSoloItemIds = null;
 let heldSoloLaneKeys = null;
 let heldSoloElement = null;
 let heldSoloMeter = null;
+let altHoldActive = false;
 
 function endItemSoloHold() {
   if (!heldSoloItemIds) return;
@@ -1166,7 +1167,10 @@ function endItemSoloHold() {
 
 function enableItemSoloHold(element, getItemIds, getLaneKeys = null) {
   element.addEventListener("mousedown", (event) => {
-    if (event.button !== 1) return;
+    const isMiddle = event.button === 1;
+    const isAltClick = event.button === 0 && event.altKey;
+    if (!isMiddle && !isAltClick) return;
+    if (isAltClick) altHoldActive = true;
     event.preventDefault();
     event.stopPropagation();
     endItemSoloHold();
@@ -1280,7 +1284,7 @@ function renderItemPickerItems() {
     const choose = document.createElement("button");
     choose.type = "button";
     choose.className = "item-choice-main";
-    choose.title = `${item.id}を選択／ホイール押し込み中はSOLO`;
+    choose.title = `${item.id}を選択／ホイール押し込み or Alt+クリック中はSOLO`;
     const name = document.createElement("strong");
     name.textContent = item.id;
     const timbre = document.createElement("span");
@@ -1324,11 +1328,15 @@ function buildSetButtons() {
     button.type = "button";
     button.className = "set-button";
     button.innerHTML = `${name}<small>SET ${index + 1}</small>`;
-    button.title = "左クリックで切り替え／ホイール押し込み中は一時切り替え";
+    button.title = "左クリックで切り替え／ホイール押し込み or Alt+クリック中は一時切り替え";
     button.addEventListener("click", () => switchSet(index));
     button.addEventListener("mousedown", (event) => {
-      if (event.button !== 1) return;
+      const isMiddle = event.button === 1;
+      const isAltClick = event.button === 0 && event.altKey;
+      if (!isMiddle && !isAltClick) return;
+      if (isAltClick) altHoldActive = true;
       event.preventDefault();
+      event.stopPropagation();
       beginTemporarySetSwitch(index, button);
     });
     button.addEventListener("auxclick", (event) => {
@@ -1380,10 +1388,10 @@ function buildSlots() {
       });
       enableWheelSelection(itemButton, () => sets[activeSet].slots[index].category, chooseItem);
       enableItemSoloHold(itemButton, () => itemButton.dataset.itemId, () => key);
-      category.title = "BASS / HI-HATの選択／ホイール押し込み中はこのパートをSOLO";
+      category.title = "BASS / HI-HATの選択／ホイール押し込み or Alt+クリック中はこのパートをSOLO";
       enableItemSoloHold(category, () => itemButton.dataset.itemId, () => key);
       const slotTitle = $(".slot-title", card);
-      slotTitle.title = "ホイール押し込み中はこのパートをSOLO";
+      slotTitle.title = "ホイール押し込み or Alt+クリック中はこのパートをSOLO";
       enableItemSoloHold(slotTitle, () => itemButton.dataset.itemId, () => key);
     } else {
       $$(".pair-row", card).forEach((row, pairIndex) => {
@@ -1415,8 +1423,8 @@ function buildSlots() {
       });
     }
     card.title = pair
-      ? "カード全体のホイール押し込み中はS-A＋S-BをペアSOLO"
-      : "カード全体のホイール押し込み中はこのパートをSOLO";
+      ? "カード全体のホイール押し込み or Alt+クリック中はS-A＋S-BをペアSOLO"
+      : "カード全体のホイール押し込み or Alt+クリック中はこのパートをSOLO";
     enableItemSoloHold(
       card,
       () => {
@@ -1721,11 +1729,24 @@ $("#itemPickerDialog").addEventListener("close", () => {
   itemPickerState = null;
 });
 window.addEventListener("mouseup", (event) => {
-  if (event.button !== 1) return;
-  endItemSoloHold();
-  endTemporarySetSwitch();
+  if (event.button === 1) {
+    endItemSoloHold();
+    endTemporarySetSwitch();
+  } else if (event.button === 0 && altHoldActive) {
+    endItemSoloHold();
+    endTemporarySetSwitch();
+    setTimeout(() => { altHoldActive = false; }, 0);
+  }
 });
+window.addEventListener("click", (event) => {
+  if (altHoldActive) {
+    altHoldActive = false;
+    event.stopImmediatePropagation();
+    event.preventDefault();
+  }
+}, true);
 window.addEventListener("blur", () => {
+  altHoldActive = false;
   endItemSoloHold();
   endTemporarySetSwitch();
 });
@@ -1758,6 +1779,7 @@ $$('.tech-button').forEach((button) => {
     setStatus(enabled ? `TECH ${name.toUpperCase()} 発動中` : (engine.playing ? "演奏中" : "停止中"), enabled || engine.playing);
   };
 
+  button.addEventListener("webkitmouseforcewillbegin", (event) => event.preventDefault());
   button.addEventListener("pointerdown", (event) => {
     if (event.button !== 0) return;
     event.preventDefault();
@@ -1822,6 +1844,7 @@ function bindDirectTechButtons(selector, techName, configure, statusText) {
       }
     };
 
+    button.addEventListener("webkitmouseforcewillbegin", (event) => event.preventDefault());
     button.addEventListener("pointerdown", (event) => {
       if (event.button !== 0) return;
       event.preventDefault();

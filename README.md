@@ -1,4 +1,3 @@
-# GROOVE JIGOKU VI
 
 ![](https://i.imgur.com/vyko16f.png)
 
