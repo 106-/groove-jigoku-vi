@@ -1,0 +1,392 @@
+<!doctype html>
+<html lang="ja">
+
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>GROOVE JIGOKU VI</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+
+<body>
+  <main class="app-shell">
+    <header class="hero">
+      <div>
+        <p class="eyebrow">SPTN / VAB BROWSER REPLAYER</p>
+        <h1>GROOVE JIGOKU <span>VI</span></h1>
+      </div>
+      <div class="transport-status" aria-live="polite">
+        <span id="statusLamp" class="status-lamp"></span>
+        <span id="statusText">停止中</span>
+      </div>
+    </header>
+
+    <aside class="shortcut-guide" aria-label="操作ショートカット">
+      <span>SPACE: PLAY / STOP</span>
+      <span>0: 頭出し</span>
+      <span>1–8: セット切替</span>
+      <span>Q / W / E / R: L1 / L2 / R1 / R2 ON・OFF</span>
+      <span>ホイール押込: HOLD SOLO</span>
+    </aside>
+
+    <section class="transport panel" aria-label="トランスポート">
+      <button id="playButton" class="transport-button primary" type="button">▶ PLAY</button>
+      <button id="cueButton" class="transport-button" type="button">↤ 頭出し</button>
+      <div class="position">
+        <span>BAR</span><strong id="barDisplay">001</strong>
+        <span>BEAT</span><strong id="beatDisplay">1.00</strong>
+      </div>
+      <label class="bpm-control">
+        <span>BPM</span>
+        <input id="bpmInput" type="range" min="70" max="190" value="130">
+        <output id="bpmOutput">130</output>
+      </label>
+      <div class="master-control">
+        <label for="masterVolume">MASTER</label>
+        <input id="masterVolume" type="range" min="0" max="100" value="78">
+      </div>
+    </section>
+
+    <section class="set-section panel" aria-label="音ネタセット">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">CHUNK BANK</p>
+          <h2>音ネタセット</h2>
+        </div>
+        <div class="set-heading-actions">
+          <p>切り替えても共通クロックの位置を維持します</p>
+          <button id="randomizeSetButton" class="randomize-set-button" type="button">⚄ 現在セットをランダム</button>
+          <button id="resetSetsButton" class="reset-sets-button" type="button">↺ 初期設定に戻す</button>
+        </div>
+      </div>
+      <div id="setButtons" class="set-buttons"></div>
+    </section>
+
+    <section class="slots-section" aria-label="演奏スロット">
+      <div id="slotGrid" class="slot-grid"></div>
+    </section>
+
+    <section class="sequence-section panel" aria-label="16ステップシーケンス">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">SPTN STEP MONITOR</p>
+          <h2>16ビート表示</h2>
+        </div>
+        <p id="sequencePosition" class="sequence-position">BAR 001 · STEP 01</p>
+      </div>
+      <div class="sequence-legend" aria-hidden="true">
+        <span><i class="legend-hit"></i>発音</span>
+        <span><i class="legend-length"></i>音価</span>
+        <span><i class="legend-interrupted"></i>INT CUT</span>
+        <span>点の大きさ＝音量</span>
+      </div>
+      <div class="sequence-scroll">
+        <div class="sequence-board">
+          <div class="sequence-ruler">
+            <span>CHANNEL / BAR</span>
+            <div id="sequenceSteps" class="sequence-steps"></div>
+          </div>
+          <div id="sequenceGrid" class="sequence-grid"></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="tech-section panel" aria-label="TECH">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">LIVE PROCESSING</p>
+          <h2>TECH</h2>
+        </div>
+        <p>クリックホールド中に特殊効果が有効になります</p>
+      </div>
+      <div class="tech-buttons">
+        <div class="tech-control delay-tech-control">
+          <div class="direct-tech-heading">
+            <span>DLY</span><small>Delay — 鳴った音を遅らせて反復する</small>
+          </div>
+          <div class="effect-trigger-grid" role="group" aria-label="DLY 4 intervals">
+            <button class="delay-trigger-button" data-delay-variant="0" title="DLY 1: 12 tick / 1/16"
+              type="button">1/16</button>
+            <button class="delay-trigger-button" data-delay-variant="1" title="DLY 2: 24 tick / 1/8"
+              type="button">1/8</button>
+            <button class="delay-trigger-button" data-delay-variant="2" title="DLY 3: 32 tick / quarter-note triplet"
+              type="button">1/4T</button>
+            <button class="delay-trigger-button" data-delay-variant="3" title="DLY 4: 48 tick / 1/4"
+              type="button">1/4</button>
+          </div>
+        </div>
+        <div class="tech-control bpm-tech-control">
+          <div class="direct-tech-heading">
+            <span>BPM</span><small>Beats Per Minute — 全体をテープ風に加減速する</small>
+            <small id="bpmTechReadout" class="tech-live-readout">×1.00 · 130 BPM</small>
+          </div>
+          <div class="effect-trigger-grid" role="group" aria-label="BPM tape speed 4 directions">
+            <button class="bpm-trigger-button" data-bpm-variant="0" title="SLOW 1: original −3/60 sec"
+              type="button">−3</button>
+            <button class="bpm-trigger-button" data-bpm-variant="1" title="SLOW 2: original −9/60 sec"
+              type="button">−9</button>
+            <button class="bpm-trigger-button" data-bpm-variant="2" title="FAST 1: original +3/60 sec"
+              type="button">＋3</button>
+            <button class="bpm-trigger-button" data-bpm-variant="3" title="FAST 2: original +9/60 sec"
+              type="button">＋9</button>
+          </div>
+        </div>
+        <div class="tech-control reverb-tech-control">
+          <div class="direct-tech-heading">
+            <span>REV</span><small>Reverb — トンネルのような残響を加える</small>
+          </div>
+          <div class="effect-trigger-grid" role="group" aria-label="REV 4 depths">
+            <button class="reverb-trigger-button" data-reverb-variant="0" title="REV 1: original depth 16"
+              type="button">1</button>
+            <button class="reverb-trigger-button" data-reverb-variant="1" title="REV 2: original depth 32"
+              type="button">2</button>
+            <button class="reverb-trigger-button" data-reverb-variant="2" title="REV 3: original depth 64"
+              type="button">3</button>
+            <button class="reverb-trigger-button" data-reverb-variant="3" title="REV 4: original depth 127"
+              type="button">4</button>
+          </div>
+        </div>
+        <div class="tech-control arp-tech-control">
+          <div class="direct-tech-heading">
+            <span>ARP</span><small>Arpeggio — TB-303風のフレーズを重ねる</small>
+          </div>
+          <div class="arp-pattern-matrix" role="group" aria-label="ARP 16 patterns">
+            <button class="arp-trigger-button" data-arp-setting="0" data-arp-variant="0"
+              title="ARP pattern 1 / Program 92" type="button">1-1</button>
+            <button class="arp-trigger-button" data-arp-setting="0" data-arp-variant="1"
+              title="ARP pattern 1 / Program 93" type="button">1-2</button>
+            <button class="arp-trigger-button" data-arp-setting="0" data-arp-variant="2"
+              title="ARP pattern 1 / Program 94" type="button">1-3</button>
+            <button class="arp-trigger-button" data-arp-setting="0" data-arp-variant="3"
+              title="ARP pattern 1 / Program 95" type="button">1-4</button>
+            <button class="arp-trigger-button" data-arp-setting="1" data-arp-variant="0"
+              title="ARP pattern 2 / Program 92" type="button">2-1</button>
+            <button class="arp-trigger-button" data-arp-setting="1" data-arp-variant="1"
+              title="ARP pattern 2 / Program 93" type="button">2-2</button>
+            <button class="arp-trigger-button" data-arp-setting="1" data-arp-variant="2"
+              title="ARP pattern 2 / Program 94" type="button">2-3</button>
+            <button class="arp-trigger-button" data-arp-setting="1" data-arp-variant="3"
+              title="ARP pattern 2 / Program 95" type="button">2-4</button>
+            <button class="arp-trigger-button" data-arp-setting="2" data-arp-variant="0"
+              title="ARP pattern 3 / Program 92" type="button">3-1</button>
+            <button class="arp-trigger-button" data-arp-setting="2" data-arp-variant="1"
+              title="ARP pattern 3 / Program 93" type="button">3-2</button>
+            <button class="arp-trigger-button" data-arp-setting="2" data-arp-variant="2"
+              title="ARP pattern 3 / Program 94" type="button">3-3</button>
+            <button class="arp-trigger-button" data-arp-setting="2" data-arp-variant="3"
+              title="ARP pattern 3 / Program 95" type="button">3-4</button>
+            <button class="arp-trigger-button" data-arp-setting="3" data-arp-variant="0"
+              title="ARP pattern 4 / Program 92" type="button">4-1</button>
+            <button class="arp-trigger-button" data-arp-setting="3" data-arp-variant="1"
+              title="ARP pattern 4 / Program 93" type="button">4-2</button>
+            <button class="arp-trigger-button" data-arp-setting="3" data-arp-variant="2"
+              title="ARP pattern 4 / Program 94" type="button">4-3</button>
+            <button class="arp-trigger-button" data-arp-setting="3" data-arp-variant="3"
+              title="ARP pattern 4 / Program 95" type="button">4-4</button>
+          </div>
+        </div>
+        <div class="tech-control flsh-tech-control">
+          <div class="direct-tech-heading">
+            <span>FLSH</span><small>Flash — 専用音を一定間隔で再発音する</small>
+          </div>
+          <div class="flsh-pattern-matrix" role="group" aria-label="FLSH 16 patterns">
+            <button class="flsh-trigger-button" data-flsh-setting="0" data-flsh-variant="0"
+              title="FLSH 1-1: Program 64 / 48 tick" type="button">1-1</button>
+            <button class="flsh-trigger-button" data-flsh-setting="0" data-flsh-variant="1"
+              title="FLSH 1-2: Program 64 / 24 tick" type="button">1-2</button>
+            <button class="flsh-trigger-button" data-flsh-setting="0" data-flsh-variant="2"
+              title="FLSH 1-3: Program 64 / 12 tick" type="button">1-3</button>
+            <button class="flsh-trigger-button" data-flsh-setting="0" data-flsh-variant="3"
+              title="FLSH 1-4: Program 64 / 8 tick" type="button">1-4</button>
+            <button class="flsh-trigger-button" data-flsh-setting="1" data-flsh-variant="0"
+              title="FLSH 2-1: Program 65 / 48 tick" type="button">2-1</button>
+            <button class="flsh-trigger-button" data-flsh-setting="1" data-flsh-variant="1"
+              title="FLSH 2-2: Program 65 / 24 tick" type="button">2-2</button>
+            <button class="flsh-trigger-button" data-flsh-setting="1" data-flsh-variant="2"
+              title="FLSH 2-3: Program 65 / 12 tick" type="button">2-3</button>
+            <button class="flsh-trigger-button" data-flsh-setting="1" data-flsh-variant="3"
+              title="FLSH 2-4: Program 65 / 8 tick" type="button">2-4</button>
+            <button class="flsh-trigger-button" data-flsh-setting="2" data-flsh-variant="0"
+              title="FLSH 3-1: Program 66 / 48 tick" type="button">3-1</button>
+            <button class="flsh-trigger-button" data-flsh-setting="2" data-flsh-variant="1"
+              title="FLSH 3-2: Program 66 / 24 tick" type="button">3-2</button>
+            <button class="flsh-trigger-button" data-flsh-setting="2" data-flsh-variant="2"
+              title="FLSH 3-3: Program 66 / 12 tick" type="button">3-3</button>
+            <button class="flsh-trigger-button" data-flsh-setting="2" data-flsh-variant="3"
+              title="FLSH 3-4: Program 66 / 8 tick" type="button">3-4</button>
+            <button class="flsh-trigger-button" data-flsh-setting="3" data-flsh-variant="0"
+              title="FLSH 4-1: Program 67 / 48 tick" type="button">4-1</button>
+            <button class="flsh-trigger-button" data-flsh-setting="3" data-flsh-variant="1"
+              title="FLSH 4-2: Program 67 / 24 tick" type="button">4-2</button>
+            <button class="flsh-trigger-button" data-flsh-setting="3" data-flsh-variant="2"
+              title="FLSH 4-3: Program 67 / 12 tick" type="button">4-3</button>
+            <button class="flsh-trigger-button" data-flsh-setting="3" data-flsh-variant="3"
+              title="FLSH 4-4: Program 67 / 8 tick" type="button">4-4</button>
+          </div>
+        </div>
+        <div class="tech-control mrg-tech-control">
+          <div class="direct-tech-heading">
+            <span>MRG</span><small>Merge? （推定）— アシッド音を即座に重ねる</small>
+          </div>
+          <div class="mrg-pattern-matrix" role="group" aria-label="MRG 16 voices">
+            <button class="mrg-trigger-button" data-mrg-setting="0" data-mrg-variant="0"
+              title="MRG 1-1: Program 76 / C4" type="button">1-1</button>
+            <button class="mrg-trigger-button" data-mrg-setting="0" data-mrg-variant="1"
+              title="MRG 1-2: Program 76 / G3" type="button">1-2</button>
+            <button class="mrg-trigger-button" data-mrg-setting="0" data-mrg-variant="2"
+              title="MRG 1-3: Program 76 / G4" type="button">1-3</button>
+            <button class="mrg-trigger-button" data-mrg-setting="0" data-mrg-variant="3"
+              title="MRG 1-4: Program 76 / C5" type="button">1-4</button>
+            <button class="mrg-trigger-button" data-mrg-setting="1" data-mrg-variant="0"
+              title="MRG 2-1: Program 77 / C4" type="button">2-1</button>
+            <button class="mrg-trigger-button" data-mrg-setting="1" data-mrg-variant="1"
+              title="MRG 2-2: Program 77 / G3" type="button">2-2</button>
+            <button class="mrg-trigger-button" data-mrg-setting="1" data-mrg-variant="2"
+              title="MRG 2-3: Program 77 / G4" type="button">2-3</button>
+            <button class="mrg-trigger-button" data-mrg-setting="1" data-mrg-variant="3"
+              title="MRG 2-4: Program 77 / C5" type="button">2-4</button>
+            <button class="mrg-trigger-button" data-mrg-setting="2" data-mrg-variant="0"
+              title="MRG 3-1: Program 78 / C4" type="button">3-1</button>
+            <button class="mrg-trigger-button" data-mrg-setting="2" data-mrg-variant="1"
+              title="MRG 3-2: Program 78 / G3" type="button">3-2</button>
+            <button class="mrg-trigger-button" data-mrg-setting="2" data-mrg-variant="2"
+              title="MRG 3-3: Program 78 / G4" type="button">3-3</button>
+            <button class="mrg-trigger-button" data-mrg-setting="2" data-mrg-variant="3"
+              title="MRG 3-4: Program 78 / C5" type="button">3-4</button>
+            <button class="mrg-trigger-button" data-mrg-setting="3" data-mrg-variant="0"
+              title="MRG 4-1: Program 79 / C4" type="button">4-1</button>
+            <button class="mrg-trigger-button" data-mrg-setting="3" data-mrg-variant="1"
+              title="MRG 4-2: Program 79 / G3" type="button">4-2</button>
+            <button class="mrg-trigger-button" data-mrg-setting="3" data-mrg-variant="2"
+              title="MRG 4-3: Program 79 / G4" type="button">4-3</button>
+            <button class="mrg-trigger-button" data-mrg-setting="3" data-mrg-variant="3"
+              title="MRG 4-4: Program 79 / C5" type="button">4-4</button>
+          </div>
+        </div>
+        <div class="tech-control int-tech-control">
+          <div class="direct-tech-heading">
+            <span>INT</span><small>Interrupt — SEQを周期的に切って刻む</small>
+          </div>
+          <div class="int-trigger-grid" role="group" aria-label="INT 4 patterns">
+            <button class="int-trigger-button" data-int-variant="0" title="INT 1: 48 tick gate"
+              type="button">1/4</button>
+            <button class="int-trigger-button" data-int-variant="1" title="INT 2: 24 tick gate"
+              type="button">1/8</button>
+            <button class="int-trigger-button" data-int-variant="2" title="INT 3: 12 tick gate"
+              type="button">1/16</button>
+            <button class="int-trigger-button" data-int-variant="3" title="INT 4: 8 tick gate"
+              type="button">1/8T</button>
+          </div>
+        </div>
+        <div class="tech-control fill-tech-control">
+          <div class="direct-tech-heading">
+            <span>FIL</span><small>Fill — 頭出しを反復してフィルを作る</small>
+          </div>
+          <div class="fill-pattern-matrix" role="group" aria-label="FIL 16 patterns">
+            <button class="fill-trigger-button" data-fill-setting="0" data-fill-variant="0" title="FIL 1-1: 48 tick"
+              type="button">1-1</button>
+            <button class="fill-trigger-button" data-fill-setting="0" data-fill-variant="1" title="FIL 1-2: 24 tick"
+              type="button">1-2</button>
+            <button class="fill-trigger-button" data-fill-setting="0" data-fill-variant="2" title="FIL 1-3: 12 tick"
+              type="button">1-3</button>
+            <button class="fill-trigger-button" data-fill-setting="0" data-fill-variant="3" title="FIL 1-4: 6 tick"
+              type="button">1-4</button>
+            <button class="fill-trigger-button" data-fill-setting="1" data-fill-variant="0"
+              title="FIL 2-1: 12, 12, 24 tick" type="button">2-1</button>
+            <button class="fill-trigger-button" data-fill-setting="1" data-fill-variant="1" title="FIL 2-2: 12 tick"
+              type="button">2-2</button>
+            <button class="fill-trigger-button" data-fill-setting="1" data-fill-variant="2" title="FIL 2-3: 12, 36 tick"
+              type="button">2-3</button>
+            <button class="fill-trigger-button" data-fill-setting="1" data-fill-variant="3" title="FIL 2-4: 6 tick"
+              type="button">2-4</button>
+            <button class="fill-trigger-button" data-fill-setting="2" data-fill-variant="0" title="FIL 3-1: 12, 24 tick"
+              type="button">3-1</button>
+            <button class="fill-trigger-button" data-fill-setting="2" data-fill-variant="1"
+              title="FIL 3-2: 24, 24, 24, 12 tick" type="button">3-2</button>
+            <button class="fill-trigger-button" data-fill-setting="2" data-fill-variant="2" title="FIL 3-3: 24 tick"
+              type="button">3-3</button>
+            <button class="fill-trigger-button" data-fill-setting="2" data-fill-variant="3" title="FIL 3-4: 6 tick"
+              type="button">3-4</button>
+            <button class="fill-trigger-button" data-fill-setting="3" data-fill-variant="0" title="FIL 4-1: complex A"
+              type="button">4-1</button>
+            <button class="fill-trigger-button" data-fill-setting="3" data-fill-variant="1" title="FIL 4-2: complex B"
+              type="button">4-2</button>
+            <button class="fill-trigger-button" data-fill-setting="3" data-fill-variant="2" title="FIL 4-3: complex C"
+              type="button">4-3</button>
+            <button class="fill-trigger-button" data-fill-setting="3" data-fill-variant="3" title="FIL 4-4: 6 tick"
+              type="button">4-4</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <template id="singleSlotTemplate">
+    <article class="slot-card">
+      <header>
+        <div><span class="slot-key"></span><strong class="slot-title"></strong></div>
+        <button class="slot-toggle" type="button" role="switch" aria-checked="true">ON</button>
+      </header>
+      <div class="slot-body single-body">
+        <label>TYPE<select class="category-select">
+            <option value="B">BASS</option>
+            <option value="H">HI-HAT</option>
+          </select></label>
+        <label>音ネタ<button class="item-picker-button" type="button"></button></label>
+      </div>
+      <div class="slot-meter"><i></i></div>
+    </article>
+  </template>
+
+  <template id="pairSlotTemplate">
+    <article class="slot-card pair-card">
+      <header>
+        <div><span class="slot-key"></span><strong class="slot-title"></strong></div>
+        <button class="slot-toggle" type="button" role="switch" aria-checked="true">ON</button>
+      </header>
+      <div class="slot-body pair-body">
+        <div class="pair-row" data-pair-index="0">
+          <span>S-A</span>
+          <button class="item-picker-button" type="button"></button>
+          <button class="sequence-toggle" type="button" role="switch" aria-checked="true">SEQ ON</button>
+        </div>
+        <div class="pair-row" data-pair-index="1">
+          <span>S-B</span>
+          <button class="item-picker-button" type="button"></button>
+          <button class="sequence-toggle" type="button" role="switch" aria-checked="true">SEQ ON</button>
+        </div>
+      </div>
+      <div class="slot-meter"><i></i></div>
+    </article>
+  </template>
+
+  <dialog id="itemPickerDialog" class="item-picker-dialog" aria-labelledby="itemPickerTitle">
+    <div class="item-picker-shell">
+      <header class="item-picker-header">
+        <div>
+          <p class="eyebrow">SOUND SELECTOR</p>
+          <h2 id="itemPickerTitle">音ネタを選択</h2>
+        </div>
+        <button id="closeItemPicker" class="item-picker-close" type="button" aria-label="閉じる">×</button>
+      </header>
+      <div class="item-picker-toolbar">
+        <label>検索<input id="itemPickerSearch" type="search" placeholder="番号またはソース"></label>
+        <div class="timbre-filter-block">
+          <span>音色</span>
+          <div id="itemTimbreFilters" class="timbre-filters"></div>
+        </div>
+      </div>
+      <div class="item-picker-result-heading">
+        <span id="itemPickerCount">0 ITEMS</span>
+        <span>🔊＝同期試聴 / ホイール押し込み＝HOLD SOLO</span>
+      </div>
+      <div id="itemPickerItems" class="item-picker-items"></div>
+    </div>
+  </dialog>
+
+  <script type="module" src="app.js"></script>
+</body>
+
+</html>
