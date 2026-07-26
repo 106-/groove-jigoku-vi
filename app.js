@@ -1,3 +1,11 @@
+import {
+  PAD,
+  REPLAY_DEFINITIONS,
+  REPLAY_FPS,
+  cloneReplaySet,
+  parseReplay,
+} from "./replay.js";
+
 const SET_NAMES = ["ア", "イ", "ウ", "エ", "オ", "カ", "キ", "ク"];
 const SLOT_SHORTCUTS = [
   { code: "KeyQ", label: "Q" },
@@ -8,8 +16,13 @@ const SLOT_SHORTCUTS = [
 const STORAGE_KEY = "groove-desk-v-sets-v1";
 const LOOKAHEAD_SECONDS = 0.14;
 const SCHEDULER_INTERVAL_MS = 25;
+const REPLAY_INPUT_LOOKAHEAD_SECONDS = 0.05;
+const IMMEDIATE_AUDIO_MARGIN_SECONDS = 0.002;
+const REPLAY_FILL_TIMER_LEAD_SECONDS = 0.012;
+const CUE_QUANTIZE_TICKS = 24;
+const CUE_IMMEDIATE_WINDOW_TICKS = 7;
 const INTERRUPT_INTERVALS = [48, 24, 12, 8];
-const INTERRUPT_RELEASE_SECONDS = 0.025;
+const INTERRUPT_RELEASE_SECONDS = IMMEDIATE_AUDIO_MARGIN_SECONDS;
 const DELAY_BEAT_RATIOS = [0.25, 0.5, 2 / 3, 1];
 const DELAY_WET_LEVELS = [0.46, 0.52, 0.58, 0.64];
 const DELAY_FEEDBACK_LEVELS = [0.24, 0.32, 0.4, 0.48];
@@ -32,6 +45,57 @@ const FILL_PATTERNS = [
     [6],
   ],
 ];
+// The original UI does not move the CHANGE/TECH cursor on the same frame as
+// the direction press.  Keep the actual CROSS change immediate, but give the
+// two selection cursors a short, queued travel time.
+const REPLAY_SELECTION_LAG_MS = 90;
+// The pad dispatcher calls each held direction on frame 0, then every eight
+// 30 Hz replay frames.  SQUARE only modifies what that callback does; it does
+// not restart the direction's counter.
+const REPLAY_DIRECTION_REPEAT_FRAMES = 8;
+const REPLAY_SHOULDER_BITS = [PAD.L1, PAD.L2, PAD.R1, PAD.R2];
+const ENGINE_TECH_NAMES = ["delay", "bpm", "reverb", "stb", "arp", "flsh", "mrg", "interrupt", "fill"];
+// Exact order of the ten labels in SDED.OX.  MOD remains unmapped until its
+// original routine is identified with confidence.
+const REPLAY_TECHS = [
+  { name: "delay", label: "DLY", selector: ".delay-tech-control" },
+  { name: null, label: "MOD", selector: ".mod-tech-control" },
+  { name: "reverb", label: "REV", selector: ".reverb-tech-control" },
+  { name: "bpm", label: "BPM", selector: ".bpm-tech-control" },
+  { name: "stb", label: "STB", selector: ".stb-tech-control" },
+  { name: "arp", label: "ARP", selector: ".arp-tech-control" },
+  { name: "flsh", label: "FLSH", selector: ".flsh-tech-control" },
+  { name: "interrupt", label: "INT", selector: ".int-tech-control" },
+  { name: "fill", label: "FIL", selector: ".fill-tech-control" },
+  { name: "mrg", label: "MRG", selector: ".mrg-tech-control" },
+];
+const REPLAY_TECH_DIRECTIONS = [
+  { bit: PAD.LEFT, variant: 0 },
+  { bit: PAD.DOWN, variant: 1 },
+  { bit: PAD.RIGHT, variant: 2 },
+  { bit: PAD.UP, variant: 3 },
+];
+// Callback order in the original pad dispatcher.  The order only matters for
+// diagonals that reach a repeat boundary on the same frame.
+const REPLAY_DIRECTION_CALLBACKS = [
+  { bit: PAD.UP, selection: "tech", delta: -1 },
+  { bit: PAD.DOWN, selection: "tech", delta: 1 },
+  { bit: PAD.RIGHT, selection: "change", delta: 1 },
+  { bit: PAD.LEFT, selection: "change", delta: -1 },
+];
+const REPLAY_PAD_DISPLAY = [
+  { bit: PAD.LEFT, label: "←" },
+  { bit: PAD.DOWN, label: "↓" },
+  { bit: PAD.UP, label: "↑" },
+  { bit: PAD.RIGHT, label: "→" },
+  { bit: PAD.SQUARE, label: "□" },
+  { bit: PAD.CIRCLE, label: "○" },
+  { bit: PAD.CROSS, label: "×" },
+  { bit: PAD.L1, label: "L1" },
+  { bit: PAD.L2, label: "L2" },
+  { bit: PAD.R1, label: "R1" },
+  { bit: PAD.R2, label: "R2" },
+];
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
@@ -47,7 +111,7 @@ class GrooveEngine {
     this.items = new Map(data.items.map((item) => [item.id, item]));
     this.ticksPerQuarter = data.meta.ticksPerQuarter;
     this.bpm = data.meta.bpm;
-    this.masterLevel = 0.25;
+    this.masterLevel = 0.78;
     this.playing = false;
     this.originTime = 0;
     this.originTick = 0;
@@ -57,18 +121,22 @@ class GrooveEngine {
     this.previewSources = new Set();
     this.arpSources = new Set();
     this.flshSources = new Set();
+    this.stbSource = null;
     this.mrgSource = null;
     this.meterEpoch = 0;
     this.schedulerTimer = null;
     this.animationFrame = null;
+    this.cueRequestTimer = null;
+    this.cueRequestTime = null;
     this.getTracks = () => [];
-    this.tech = { delay: false, bpm: false, reverb: false, interrupt: false, fill: false, arp: false, flsh: false, mrg: false };
-    this.techVariant = { delay: 1, bpm: 0, reverb: 2, interrupt: 2, fill: 3, arp: 0, flsh: 0, mrg: 0 };
+    this.tech = { delay: false, bpm: false, reverb: false, interrupt: false, fill: false, stb: false, arp: false, flsh: false, mrg: false };
+    this.techVariant = { delay: 1, bpm: 0, reverb: 2, interrupt: 2, fill: 3, stb: 0, arp: 0, flsh: 0, mrg: 0 };
     this.bpmTechScale = BPM_TECH_NORMAL;
     this.bpmTechLastTime = null;
     this.bpmTechReturning = false;
     this.bpmTechReleaseStep = 6;
     this.fillSetting = 0;
+    this.stbSetting = 0;
     this.arpSetting = 0;
     this.flshSetting = 0;
     this.mrgSetting = 0;
@@ -78,7 +146,16 @@ class GrooveEngine {
     this.arpReleaseState = null;
     this.interruptStartTick = null;
     this.interruptScheduledUntilTick = 0;
-    this.fillState = { index: 0, targetTick: null, aligning: true };
+    this.interruptGateOpen = true;
+    this.fillState = {
+      index: 0,
+      targetTick: null,
+      targetTime: null,
+      endTime: null,
+      aligning: true,
+      mode: "immediate",
+      timer: null,
+    };
   }
 
   async initialize(statusCallback) {
@@ -262,6 +339,11 @@ class GrooveEngine {
       rate.cancelScheduledValues(time);
       rate.setTargetAtTime(this.mrgSource.basePlaybackRate * scale, time, 0.018);
     }
+    if (this.stbSource?.basePlaybackRate != null) {
+      const rate = this.stbSource.source.playbackRate;
+      rate.cancelScheduledValues(time);
+      rate.setTargetAtTime(this.stbSource.basePlaybackRate * scale, time, 0.018);
+    }
   }
 
   tickAtTime(time) {
@@ -288,6 +370,7 @@ class GrooveEngine {
     if (this.tech.fill) this.prepareFillTrigger(this.originTick);
     this.schedulerTimer = window.setInterval(() => this.schedule(), SCHEDULER_INTERVAL_MS);
     this.schedule();
+    if (this.tech.stb) this.startStb();
     if (this.tech.mrg) this.startMrg();
     this.drawPosition();
   }
@@ -297,52 +380,104 @@ class GrooveEngine {
     this.pausedTick = Math.max(0, this.tickAtTime(this.context.currentTime));
     this.playing = false;
     window.clearInterval(this.schedulerTimer);
+    this.clearFillTimer();
+    if (this.cueRequestTimer !== null) window.clearTimeout(this.cueRequestTimer);
+    this.cueRequestTimer = null;
+    this.cueRequestTime = null;
     cancelAnimationFrame(this.animationFrame);
     this.cancelSources(this.context.currentTime + 0.01);
     this.cancelPreviewSources(this.context.currentTime + 0.01);
     this.cancelSourceSet(this.arpSources, this.context.currentTime + 0.01);
     this.cancelSourceSet(this.flshSources, this.context.currentTime + 0.01);
     this.arpReleaseState = null;
+    this.stopStb(this.context.currentTime);
     this.stopMrg(this.context.currentTime);
     this.onPosition(this.pausedTick);
   }
 
-  cue() {
+  cue(requestTime = null) {
     this.pausedTick = 0;
     if (!this.context) {
       this.onPosition(0);
       return;
     }
-    const cutTime = this.context.currentTime + 0.015;
+    if (!this.playing) {
+      this.onPosition(0);
+      return;
+    }
+
+    // SDED.OX does not seek on the button callback itself. It keeps one
+    // pending request and executes it in the first seven ticks of each
+    // 24-tick period. Preserve that behavior while using the exact replay
+    // frame time when one is available.
+    if (this.cueRequestTime !== null) return;
+    const now = this.context.currentTime;
+    const inputTime = Math.max(this.originTime, Number(requestTime ?? now));
+    const inputTick = Math.max(0, this.tickAtTime(inputTime));
+    const phase = ((inputTick % CUE_QUANTIZE_TICKS) + CUE_QUANTIZE_TICKS)
+      % CUE_QUANTIZE_TICKS;
+    const targetTick = phase < CUE_IMMEDIATE_WINDOW_TICKS
+      ? inputTick
+      : inputTick + CUE_QUANTIZE_TICKS - phase;
+    this.cueRequestTime = this.timeAtTick(targetTick);
+    // Wake before the quantized boundary so WebAudio can place tick 0 on the
+    // exact audio timestamp instead of reacting after a JavaScript timer.
+    const wait = Math.max(
+      0,
+      (this.cueRequestTime - now - REPLAY_INPUT_LOOKAHEAD_SECONDS) * 1000,
+    );
+    this.cueRequestTimer = window.setTimeout(() => this.applyCueRequest(), wait);
+  }
+
+  applyCueRequest() {
+    if (this.cueRequestTime === null || !this.context || !this.playing) return;
+    const requestedTime = this.cueRequestTime;
+    this.cueRequestTime = null;
+    this.cueRequestTimer = null;
+    const cutTime = Math.max(
+      requestedTime,
+      this.context.currentTime + IMMEDIATE_AUDIO_MARGIN_SECONDS,
+    );
     this.cancelSources(cutTime);
     this.cancelPreviewSources(cutTime);
     this.cancelSourceSet(this.arpSources, cutTime);
     this.cancelSourceSet(this.flshSources, cutTime);
-    if (this.playing) {
-      this.originTick = 0;
-      this.originTime = cutTime + 0.025;
-      this.scheduledUntilTick = 0;
-      this.arpScheduledUntilTick = 0;
-      this.flshScheduledUntilTick = 0;
-      if (this.tech.arp) this.armArp(0);
-      else {
-        this.arpReleaseState = null;
-        this.arpStartTick = null;
-      }
-      this.resetInterruptState(0, true);
-      if (this.tech.fill) this.prepareFillTrigger(0);
-      this.schedule();
+    this.originTick = 0;
+    this.originTime = cutTime;
+    this.scheduledUntilTick = 0;
+    this.arpScheduledUntilTick = 0;
+    this.flshScheduledUntilTick = 0;
+    if (this.tech.arp) this.armArp(0);
+    else {
+      this.arpReleaseState = null;
+      this.arpStartTick = null;
     }
+    this.resetInterruptState(0, true);
+    if (this.tech.fill) this.prepareFillTrigger(0);
+    this.schedule();
     this.onPosition(0);
   }
 
-  preserveClockReschedule() {
+  preserveClockReschedule(delaySeconds = 0.015) {
+    const transitionTime = this.context
+      ? this.context.currentTime + Math.max(
+        IMMEDIATE_AUDIO_MARGIN_SECONDS,
+        Number(delaySeconds),
+      )
+      : null;
+    this.preserveClockRescheduleAt(transitionTime);
+  }
+
+  preserveClockRescheduleAt(transitionTime) {
     if (!this.context || !this.playing) {
       if (this.context) this.cancelPreviewSources(this.context.currentTime + 0.01);
       this.onPosition(this.pausedTick);
       return;
     }
-    const cutTime = this.context.currentTime + 0.015;
+    const cutTime = Math.max(
+      Number(transitionTime),
+      this.context.currentTime + IMMEDIATE_AUDIO_MARGIN_SECONDS,
+    );
     const tick = Math.max(0, this.tickAtTime(cutTime));
     this.cancelSources(cutTime);
     this.cancelPreviewSources(cutTime);
@@ -391,37 +526,47 @@ class GrooveEngine {
     }
   }
 
-  setTech(name, enabled) {
+  setTech(name, enabled, effectiveTime = null, options = null) {
     const wasEnabled = this.tech[name];
     if (name === "bpm" && this.context) this.advanceBpmTech(this.context.currentTime);
+    const now = this.context
+      ? Number(effectiveTime ?? this.context.currentTime)
+      : 0;
     this.tech[name] = enabled;
     if (name === "fill") {
       if (enabled) {
-        const tick = this.context && this.playing
-          ? Math.max(0, this.tickAtTime(this.context.currentTime))
-          : this.pausedTick;
-        this.prepareFillTrigger(tick);
-        if (this.context && this.playing && this.maybeApplyFillRetrigger(this.context.currentTime)) {
-          this.schedule();
+        if (options?.replay && this.context && this.playing) {
+          this.prepareReplayFillTrigger(now, options.endTime);
+        } else {
+          const tick = this.context && this.playing
+            ? Math.max(0, this.tickAtTime(now))
+            : this.pausedTick;
+          this.prepareFillTrigger(tick);
+          if (this.context && this.playing && this.maybeApplyFillRetrigger(now)) {
+            this.schedule();
+          }
         }
       } else {
+        this.clearFillTimer();
         this.fillState.targetTick = null;
+        this.fillState.targetTime = null;
+        this.fillState.endTime = null;
       }
     }
     if (name === "interrupt") {
-      const now = this.context?.currentTime ?? 0;
       const tick = this.context && this.playing ? Math.max(0, this.tickAtTime(now)) : this.pausedTick;
       if (enabled && !wasEnabled) {
+        this.interruptGateOpen = true;
         this.armInterrupt(tick);
         if (this.context && this.playing) this.rescheduleForInterruptChange(now);
       } else if (!enabled && wasEnabled) {
         this.interruptStartTick = null;
+        this.interruptGateOpen = true;
         this.interruptScheduledUntilTick = tick;
         if (this.context && this.playing) this.rescheduleForInterruptChange(now);
       }
     }
     if (name === "arp") {
-      const now = this.context?.currentTime ?? 0;
       const tick = this.context && this.playing ? Math.max(0, this.tickAtTime(now)) : this.pausedTick;
       this.arpScheduledUntilTick = tick;
       if (enabled && !wasEnabled) {
@@ -437,19 +582,21 @@ class GrooveEngine {
       }
     }
     if (name === "flsh") {
-      const now = this.context?.currentTime ?? 0;
       const tick = this.context && this.playing ? Math.max(0, this.tickAtTime(now)) : this.pausedTick;
       this.flshScheduledUntilTick = tick;
       if (this.context && this.playing) {
         this.rescheduleFlshFuture(now);
       }
     }
+    if (name === "stb") {
+      if (enabled && !wasEnabled) this.startStb(now);
+      if (!enabled && wasEnabled) this.stopStb(now);
+    }
     if (name === "mrg") {
-      if (enabled && !wasEnabled) this.startMrg();
-      if (!enabled && wasEnabled) this.stopMrg(this.context?.currentTime ?? 0);
+      if (enabled && !wasEnabled) this.startMrg(now);
+      if (!enabled && wasEnabled) this.stopMrg(now);
     }
     if (name === "bpm") {
-      const now = this.context?.currentTime ?? 0;
       if (enabled) {
         this.bpmTechReturning = false;
         this.bpmTechReleaseStep = Math.abs(BPM_TECH_STEPS[this.techVariant.bpm]) * 2;
@@ -459,44 +606,125 @@ class GrooveEngine {
       this.bpmTechLastTime = this.context ? now : null;
     }
     if (!this.context) return;
-    const now = this.context.currentTime;
     if (name === "delay") this.delaySend.gain.setTargetAtTime(enabled ? 1 : 0, now, enabled ? 0.008 : 0.025);
     if (name === "reverb") this.reverbSend.gain.setTargetAtTime(enabled ? 1 : 0, now, enabled ? 0.008 : 0.025);
   }
 
-  setTechVariant(name, variant) {
+  setTechVariant(name, variant, effectiveTime = null) {
     if (name === "bpm" && this.context) this.advanceBpmTech(this.context.currentTime);
+    const interruptNow = this.context
+      ? Number(effectiveTime ?? this.context.currentTime)
+      : 0;
+    const interruptTick = this.context && this.playing
+      ? Math.max(0, this.tickAtTime(interruptNow))
+      : this.pausedTick;
+    const interruptWasOpen = name === "interrupt" && this.tech.interrupt
+      ? this.isInterruptOpen(interruptTick)
+      : true;
     this.techVariant[name] = Math.max(0, Math.min(3, Number(variant)));
     if (name === "fill" && this.tech.fill) {
       const tick = this.context && this.playing
-        ? Math.max(0, this.tickAtTime(this.context.currentTime))
+        ? Math.max(0, this.tickAtTime(interruptNow))
         : this.pausedTick;
       this.prepareFillTrigger(tick);
     }
     if (name === "interrupt" && this.tech.interrupt) {
-      const now = this.context?.currentTime ?? 0;
-      const tick = this.context && this.playing ? Math.max(0, this.tickAtTime(now)) : this.pausedTick;
-      this.armInterrupt(tick);
-      if (this.context && this.playing) this.rescheduleForInterruptChange(now);
+      // The original only replaces the interval here. Its six track mute
+      // flags remain as they are until the first boundary of the new interval.
+      this.interruptGateOpen = interruptWasOpen;
+      this.armInterrupt(interruptTick);
+      if (this.context && this.playing) this.rescheduleForInterruptChange(interruptNow);
     }
     if ((name === "delay" || name === "reverb") && this.context) {
-      this.updateTempoEffects();
+      this.updateTempoEffects(interruptNow);
     }
     if (name === "bpm") {
       this.bpmTechReleaseStep = Math.abs(BPM_TECH_STEPS[this.techVariant.bpm]) * 2;
     }
   }
 
-  setFillPattern(setting, variant) {
+  setFillPattern(setting, variant, effectiveTime = null, replayEndTime = null) {
     this.fillSetting = Math.max(0, Math.min(3, Number(setting)));
     this.techVariant.fill = Math.max(0, Math.min(3, Number(variant)));
+    if (
+      this.tech.fill
+      && this.fillState.mode === "replay"
+      && this.context
+      && this.playing
+      && effectiveTime != null
+    ) {
+      this.prepareReplayFillTrigger(
+        Number(effectiveTime),
+        replayEndTime ?? this.fillState.endTime,
+      );
+    }
   }
 
-  setArpPattern(setting, variant) {
-    this.arpSetting = Math.max(0, Math.min(3, Number(setting)));
+  setStbPattern(setting, variant, effectiveTime = null) {
+    this.stbSetting = Math.max(
+      0,
+      Math.min((this.data.stb?.settings.length ?? 1) - 1, Number(setting)),
+    );
+    this.techVariant.stb = Math.max(0, Math.min(3, Number(variant)));
+    if (this.tech.stb) this.startStb(effectiveTime);
+  }
+
+  startStb(effectiveTime = null) {
+    if (!this.context || !this.tech.stb || !this.data.stb) return;
+    const setting = this.data.stb.settings[this.stbSetting];
+    const voice = setting?.voices[this.techVariant.stb];
+    const buffer = this.buffers.get(voice?.sampleId);
+    if (!voice || !buffer) return;
+
+    const now = effectiveTime == null
+      ? this.context.currentTime + IMMEDIATE_AUDIO_MARGIN_SECONDS
+      : Math.max(Number(effectiveTime), this.context.currentTime + IMMEDIATE_AUDIO_MARGIN_SECONDS);
+    this.stopStb(now);
+    const source = this.context.createBufferSource();
+    const gain = this.context.createGain();
+    const info = this.sampleInfo[String(voice.sampleId)];
+    source.buffer = buffer;
+    const basePlaybackRate = voice.ratio;
+    source.playbackRate.value = basePlaybackRate * (this.bpmTechScale / BPM_TECH_NORMAL);
+    if (info.loop && info.loopStart != null && info.loopEnd != null) {
+      source.loop = true;
+      source.loopStart = info.loopStart / this.data.meta.sampleRate;
+      source.loopEnd = info.loopEnd / this.data.meta.sampleRate;
+    }
+    gain.gain.setValueAtTime(Math.max(0.0001, voice.level), now);
+    source.connect(gain).connect(this.mixGain);
+    source.start(now);
+
+    const record = { source, gain, basePlaybackRate };
+    this.stbSource = record;
+    source.addEventListener("ended", () => {
+      if (this.stbSource === record) this.stbSource = null;
+    }, { once: true });
+  }
+
+  stopStb(time) {
+    const record = this.stbSource;
+    if (!record || !this.context) return;
+    this.stbSource = null;
+    const gain = record.gain.gain;
+    if (typeof gain.cancelAndHoldAtTime === "function") {
+      gain.cancelAndHoldAtTime(time);
+    } else {
+      gain.cancelScheduledValues(time);
+      gain.setValueAtTime(Math.max(0.0001, gain.value), time);
+    }
+    gain.linearRampToValueAtTime(0.0001, time + 0.012);
+    try { record.source.stop(time + 0.02); } catch { /* already stopped */ }
+  }
+
+  setArpPattern(setting, variant, effectiveTime = null) {
+    this.arpSetting = Math.max(
+      0,
+      Math.min((this.data.arp?.patterns.length ?? 1) - 1, Number(setting)),
+    );
     this.techVariant.arp = Math.max(0, Math.min(3, Number(variant)));
     if (this.tech.arp && this.context && this.playing) {
-      this.rescheduleArpFuture(this.context.currentTime);
+      this.rescheduleArpFuture(Number(effectiveTime ?? this.context.currentTime));
     }
   }
 
@@ -562,7 +790,9 @@ class GrooveEngine {
   scheduleArp(fromTick, toTick) {
     if ((!this.tech.arp && !this.arpReleaseState) || !this.data.arp || this.arpStartTick == null) return;
     const pattern = this.data.arp.patterns[this.arpSetting];
-    const variant = this.data.arp.variants[this.techVariant.arp];
+    const programOffset = this.data.arp.directionProgramOffsets?.[this.techVariant.arp]
+      ?? this.techVariant.arp;
+    const variant = this.data.arp.variants[pattern.programGroup * 4 + programOffset];
     const arpFrom = Math.max(fromTick, this.arpScheduledUntilTick, this.arpStartTick);
     const firstCycle = Math.max(0, Math.floor((arpFrom - this.arpStartTick) / pattern.ticks) - 1);
     const lastCycle = Math.floor((toTick - this.arpStartTick) / pattern.ticks) + 1;
@@ -599,11 +829,14 @@ class GrooveEngine {
     }
   }
 
-  setFlshPattern(setting, variant) {
-    this.flshSetting = Math.max(0, Math.min(3, Number(setting)));
+  setFlshPattern(setting, variant, effectiveTime = null) {
+    this.flshSetting = Math.max(
+      0,
+      Math.min((this.data.flsh?.settings.length ?? 1) - 1, Number(setting)),
+    );
     this.techVariant.flsh = Math.max(0, Math.min(3, Number(variant)));
     if (this.tech.flsh && this.context && this.playing) {
-      this.rescheduleFlshFuture(this.context.currentTime);
+      this.rescheduleFlshFuture(Number(effectiveTime ?? this.context.currentTime));
     }
   }
 
@@ -681,19 +914,24 @@ class GrooveEngine {
     }
   }
 
-  setMrgPattern(setting, variant) {
-    this.mrgSetting = Math.max(0, Math.min(3, Number(setting)));
+  setMrgPattern(setting, variant, effectiveTime = null) {
+    this.mrgSetting = Math.max(
+      0,
+      Math.min((this.data.mrg?.settings.length ?? 1) - 1, Number(setting)),
+    );
     this.techVariant.mrg = Math.max(0, Math.min(3, Number(variant)));
-    if (this.tech.mrg) this.startMrg();
+    if (this.tech.mrg) this.startMrg(effectiveTime);
   }
 
-  startMrg() {
+  startMrg(effectiveTime = null) {
     if (!this.context || !this.tech.mrg || !this.data.mrg) return;
     const setting = this.data.mrg.settings[this.mrgSetting];
     const buffer = this.buffers.get(setting.sampleId);
     if (!buffer) return;
 
-    const now = this.context.currentTime + 0.004;
+    const now = effectiveTime == null
+      ? this.context.currentTime + 0.004
+      : Math.max(Number(effectiveTime), this.context.currentTime + IMMEDIATE_AUDIO_MARGIN_SECONDS);
     this.stopMrg(now);
     const source = this.context.createBufferSource();
     const gain = this.context.createGain();
@@ -742,7 +980,9 @@ class GrooveEngine {
 
   isInterruptOpen(tick) {
     if (!this.tech.interrupt) return true;
-    if (this.interruptStartTick != null && tick < this.interruptStartTick - 1e-6) return true;
+    if (this.interruptStartTick != null && tick < this.interruptStartTick - 1e-6) {
+      return this.interruptGateOpen;
+    }
     const interval = INTERRUPT_INTERVALS[this.techVariant.interrupt];
     return Math.floor(Math.max(0, tick) / interval) % 2 === 0;
   }
@@ -757,9 +997,12 @@ class GrooveEngine {
     this.interruptScheduledUntilTick = tick;
     if (!this.tech.interrupt) {
       this.interruptStartTick = null;
+      this.interruptGateOpen = true;
     } else if (alignNow) {
       this.interruptStartTick = tick;
+      this.interruptGateOpen = true;
     } else {
+      this.interruptGateOpen = true;
       this.armInterrupt(tick);
     }
   }
@@ -788,7 +1031,9 @@ class GrooveEngine {
   }
 
   rescheduleForInterruptChange(now) {
-    this.restorePendingInterruptReleases(now);
+    if (this.interruptGateOpen || !this.tech.interrupt) {
+      this.restorePendingInterruptReleases(now);
+    }
     const transitionFromTick = this.interruptScheduledUntilTick;
     const cutTime = now + 0.001;
     for (const record of this.activeSources) {
@@ -836,47 +1081,139 @@ class GrooveEngine {
   }
 
   prepareFillTrigger(tick) {
-    this.fillState = { index: 0, targetTick: Math.max(0, tick), aligning: true };
+    this.clearFillTimer();
+    this.fillState = {
+      index: 0,
+      targetTick: Math.max(0, tick),
+      targetTime: null,
+      endTime: null,
+      aligning: true,
+      mode: "immediate",
+      timer: null,
+    };
   }
 
-  maybeApplyFillRetrigger(now) {
-    if (!this.tech.fill || this.fillState.targetTick == null) return false;
-    const tick = Math.max(0, this.tickAtTime(now));
-    if (tick + 0.5 < this.fillState.targetTick) return false;
-
-    const barTicks = this.ticksPerQuarter * 4;
-    const pattern = FILL_PATTERNS[this.fillSetting][this.techVariant.fill];
-    const barStart = Math.floor(this.fillState.targetTick / barTicks) * barTicks;
-    const cutTime = now + 0.006;
-    this.cancelSources(cutTime);
-    this.cancelSourceSet(this.arpSources, cutTime);
-    this.cancelSourceSet(this.flshSources, cutTime);
-    this.originTick = barStart;
-    this.originTime = cutTime;
-    this.pausedTick = barStart;
-    this.scheduledUntilTick = barStart;
-    this.arpScheduledUntilTick = barStart;
-    this.flshScheduledUntilTick = barStart;
-    if (this.tech.arp) this.armArp(barStart);
-    else {
-      this.arpReleaseState = null;
-      this.arpStartTick = null;
+  clearFillTimer() {
+    if (this.fillState?.timer !== null && this.fillState?.timer !== undefined) {
+      window.clearTimeout(this.fillState.timer);
+      this.fillState.timer = null;
     }
+  }
+
+  prepareReplayFillTrigger(inputTime, endTime = Number.POSITIVE_INFINITY) {
+    this.clearFillTimer();
+    const inputTick = Math.max(0, this.tickAtTime(inputTime));
+    const targetTick = Math.ceil(inputTick / CUE_QUANTIZE_TICKS - 1e-9)
+      * CUE_QUANTIZE_TICKS;
+    this.fillState = {
+      index: 0,
+      targetTick,
+      targetTime: this.timeAtTick(targetTick),
+      endTime: Number(endTime ?? Number.POSITIVE_INFINITY),
+      aligning: true,
+      mode: "replay",
+      timer: null,
+    };
+    this.scheduleReplayFillTrigger();
+  }
+
+  scheduleReplayFillTrigger() {
+    if (
+      !this.context
+      || !this.playing
+      || !this.tech.fill
+      || this.fillState.mode !== "replay"
+      || this.fillState.targetTime == null
+      || this.fillState.targetTime >= this.fillState.endTime - 1e-6
+    ) return;
+    this.clearFillTimer();
+    const wait = Math.max(
+      0,
+      (
+        this.fillState.targetTime
+        - this.context.currentTime
+        - REPLAY_FILL_TIMER_LEAD_SECONDS
+      ) * 1000,
+    );
+    this.fillState.timer = window.setTimeout(() => {
+      this.fillState.timer = null;
+      this.applyReplayFillRetrigger();
+    }, wait);
+  }
+
+  advanceFillPattern() {
+    const pattern = FILL_PATTERNS[this.fillSetting][this.techVariant.fill];
     if (this.fillState.aligning) {
       this.fillState.aligning = false;
       this.fillState.index = 0;
     } else {
       this.fillState.index = (this.fillState.index + 1) % pattern.length;
     }
-    this.fillState.targetTick = barStart + pattern[this.fillState.index];
-    this.resetInterruptState(barStart, true);
-    this.onPosition(barStart);
+    return pattern[this.fillState.index];
+  }
+
+  resetSequenceForFill(cutTime, originTick) {
+    this.cancelSources(cutTime);
+    this.cancelSourceSet(this.arpSources, cutTime);
+    this.cancelSourceSet(this.flshSources, cutTime);
+    this.originTick = originTick;
+    this.originTime = cutTime;
+    this.pausedTick = originTick;
+    this.scheduledUntilTick = originTick;
+    this.arpScheduledUntilTick = originTick;
+    this.flshScheduledUntilTick = originTick;
+    if (this.tech.arp) this.armArp(originTick);
+    else {
+      this.arpReleaseState = null;
+      this.arpStartTick = null;
+    }
+    this.resetInterruptState(originTick, true);
+    this.onPosition(originTick);
+  }
+
+  applyReplayFillRetrigger() {
+    if (
+      !this.context
+      || !this.playing
+      || !this.tech.fill
+      || this.fillState.mode !== "replay"
+      || this.fillState.targetTime == null
+      || this.fillState.targetTime >= this.fillState.endTime - 1e-6
+    ) return;
+
+    const targetTime = this.fillState.targetTime;
+    const cutTime = Math.max(
+      targetTime,
+      this.context.currentTime + IMMEDIATE_AUDIO_MARGIN_SECONDS,
+    );
+    this.resetSequenceForFill(cutTime, 0);
+    const interval = this.advanceFillPattern();
+    this.fillState.targetTick = interval;
+    this.fillState.targetTime = cutTime + interval / this.ticksPerSecond();
+    this.schedule();
+    this.scheduleReplayFillTrigger();
+  }
+
+  maybeApplyFillRetrigger(now) {
+    if (
+      !this.tech.fill
+      || this.fillState.mode === "replay"
+      || this.fillState.targetTick == null
+    ) return false;
+    const tick = Math.max(0, this.tickAtTime(now));
+    if (tick + 0.5 < this.fillState.targetTick) return false;
+
+    const barTicks = this.ticksPerQuarter * 4;
+    const barStart = Math.floor(this.fillState.targetTick / barTicks) * barTicks;
+    const cutTime = now + 0.006;
+    this.resetSequenceForFill(cutTime, barStart);
+    this.fillState.targetTick = barStart + this.advanceFillPattern();
     return true;
   }
 
-  updateTempoEffects() {
+  updateTempoEffects(effectiveTime = null) {
     if (!this.context) return;
-    const now = this.context.currentTime;
+    const now = Number(effectiveTime ?? this.context.currentTime);
     const delayVariant = this.techVariant.delay;
     this.delayNode.delayTime.setTargetAtTime(
       (60 / this.effectiveBpm()) * DELAY_BEAT_RATIOS[delayVariant],
@@ -1098,11 +1435,21 @@ let sets = loadSets();
 let activeSet = 0;
 let heldSetOrigin = null;
 let heldSetButton = null;
+let selectedReplayId = REPLAY_DEFINITIONS[0].id;
+let replaySession = null;
 const slotElements = [];
 let renderedSequenceKey = "";
 
 const engine = new GrooveEngine(data, updatePosition);
 engine.getTracks = getActiveTracks;
+
+function performanceSet() {
+  return replaySession?.liveSet ?? sets[activeSet];
+}
+
+function audioPerformanceSet() {
+  return replaySession?.audioLiveSet ?? sets[activeSet];
+}
 
 function normalizeSet(set) {
   const defaults = makeDefaultSets()[activeSet];
@@ -1128,7 +1475,7 @@ function setItemButton(button, category, selected) {
   detail.textContent = item.source;
   button.replaceChildren(name, detail);
   button.dataset.itemId = item.id;
-  button.title = "クリックで一覧／ホイール上下で前後送り／ホイール押し込み or Alt+クリック中はSOLO";
+  button.title = "クリックで一覧／ホイール上下で前後送り／ホイール押し込み中はSOLO";
   return item.id;
 }
 
@@ -1152,7 +1499,6 @@ let heldSoloItemIds = null;
 let heldSoloLaneKeys = null;
 let heldSoloElement = null;
 let heldSoloMeter = null;
-let altHoldActive = false;
 
 function endItemSoloHold() {
   if (!heldSoloItemIds) return;
@@ -1167,10 +1513,7 @@ function endItemSoloHold() {
 
 function enableItemSoloHold(element, getItemIds, getLaneKeys = null) {
   element.addEventListener("mousedown", (event) => {
-    const isMiddle = event.button === 1;
-    const isAltClick = event.button === 0 && event.altKey;
-    if (!isMiddle && !isAltClick) return;
-    if (isAltClick) altHoldActive = true;
+    if (event.button !== 1) return;
     event.preventDefault();
     event.stopPropagation();
     endItemSoloHold();
@@ -1284,7 +1627,7 @@ function renderItemPickerItems() {
     const choose = document.createElement("button");
     choose.type = "button";
     choose.className = "item-choice-main";
-    choose.title = `${item.id}を選択／ホイール押し込み or Alt+クリック中はSOLO`;
+    choose.title = `${item.id}を選択／ホイール押し込み中はSOLO`;
     const name = document.createElement("strong");
     name.textContent = item.id;
     const timbre = document.createElement("span");
@@ -1328,15 +1671,11 @@ function buildSetButtons() {
     button.type = "button";
     button.className = "set-button";
     button.innerHTML = `${name}<small>SET ${index + 1}</small>`;
-    button.title = "左クリックで切り替え／ホイール押し込み or Alt+クリック中は一時切り替え";
+    button.title = "左クリックで切り替え／ホイール押し込み中は一時切り替え";
     button.addEventListener("click", () => switchSet(index));
     button.addEventListener("mousedown", (event) => {
-      const isMiddle = event.button === 1;
-      const isAltClick = event.button === 0 && event.altKey;
-      if (!isMiddle && !isAltClick) return;
-      if (isAltClick) altHoldActive = true;
+      if (event.button !== 1) return;
       event.preventDefault();
-      event.stopPropagation();
       beginTemporarySetSwitch(index, button);
     });
     button.addEventListener("auxclick", (event) => {
@@ -1347,6 +1686,7 @@ function buildSetButtons() {
 }
 
 function toggleSlotEnabled(index) {
+  if (replaySession?.running) return;
   const slot = sets[activeSet].slots[index];
   if (!slot) return;
   slot.enabled = !slot.enabled;
@@ -1388,10 +1728,10 @@ function buildSlots() {
       });
       enableWheelSelection(itemButton, () => sets[activeSet].slots[index].category, chooseItem);
       enableItemSoloHold(itemButton, () => itemButton.dataset.itemId, () => key);
-      category.title = "BASS / HI-HATの選択／ホイール押し込み or Alt+クリック中はこのパートをSOLO";
+      category.title = "BASS / HI-HATの選択／ホイール押し込み中はこのパートをSOLO";
       enableItemSoloHold(category, () => itemButton.dataset.itemId, () => key);
       const slotTitle = $(".slot-title", card);
-      slotTitle.title = "ホイール押し込み or Alt+クリック中はこのパートをSOLO";
+      slotTitle.title = "ホイール押し込み中はこのパートをSOLO";
       enableItemSoloHold(slotTitle, () => itemButton.dataset.itemId, () => key);
     } else {
       $$(".pair-row", card).forEach((row, pairIndex) => {
@@ -1423,8 +1763,8 @@ function buildSlots() {
       });
     }
     card.title = pair
-      ? "カード全体のホイール押し込み or Alt+クリック中はS-A＋S-BをペアSOLO"
-      : "カード全体のホイール押し込み or Alt+クリック中はこのパートをSOLO";
+      ? "カード全体のホイール押し込み中はS-A＋S-BをペアSOLO"
+      : "カード全体のホイール押し込み中はこのパートをSOLO";
     enableItemSoloHold(
       card,
       () => {
@@ -1439,8 +1779,8 @@ function buildSlots() {
 }
 
 function renderSlots() {
-  sets[activeSet] = normalizeSet(sets[activeSet]);
-  sets[activeSet].slots.forEach((slot, index) => {
+  if (!replaySession) sets[activeSet] = normalizeSet(sets[activeSet]);
+  performanceSet().slots.forEach((slot, index) => {
     const card = slotElements[index];
     const toggle = $(".slot-toggle", card);
     const togglePrefix = slot.type === "single" ? "SEQ" : "ALL";
@@ -1471,7 +1811,7 @@ function getActiveTracks() {
   if (heldSoloItemIds) {
     return heldSoloItemIds.map((itemId) => ({ enabled: true, itemId, meter: heldSoloMeter }));
   }
-  const set = sets[activeSet];
+  const set = audioPerformanceSet();
   const tracks = [];
   set.slots.forEach((slot, index) => {
     const meter = $(".slot-meter i", slotElements[index]);
@@ -1490,7 +1830,7 @@ function getSequenceTracks() {
   const tracks = [];
   const soloItemIds = heldSoloItemIds ? new Set(heldSoloItemIds) : null;
   const soloLaneKeys = heldSoloLaneKeys ? new Set(heldSoloLaneKeys) : null;
-  sets[activeSet].slots.forEach((slot) => {
+  performanceSet().slots.forEach((slot) => {
     if (slot.type === "single") {
       tracks.push({
         lane: slot.key,
@@ -1552,7 +1892,7 @@ function renderSequence(tick) {
   const interruptKey = engine.tech.interrupt
     ? `${engine.techVariant.interrupt}@${Math.round(engine.interruptStartTick ?? -1)}`
     : "off";
-  const sequenceKey = `${activeSet}:${globalBar}:int=${interruptKey}:${tracks.map((track) => `${track.lane},${track.itemId},${track.enabled}`).join("|")}`;
+  const sequenceKey = `${activeSet}:replay=${replaySession?.revision ?? "off"}:${globalBar}:int=${interruptKey}:${tracks.map((track) => `${track.lane},${track.itemId},${track.enabled}`).join("|")}`;
 
   if (sequenceKey !== renderedSequenceKey) {
     const lanes = tracks.map((track) => {
@@ -1600,6 +1940,7 @@ function renderSequence(tick) {
 }
 
 function switchSet(index) {
+  if (replaySession?.running) return;
   if (index === activeSet) return;
   activeSet = index;
   $$(".set-button").forEach((button, buttonIndex) => button.classList.toggle("active", buttonIndex === index));
@@ -1629,6 +1970,7 @@ function endTemporarySetSwitch() {
 }
 
 function resetSets() {
+  if (replaySession?.running) return;
   const confirmed = window.confirm("ア～クの8セットを初期設定に戻します。現在の登録内容は上書きされます。よろしいですか？");
   if (!confirmed) return;
   sets = makeDefaultSets();
@@ -1639,6 +1981,7 @@ function resetSets() {
 }
 
 function randomizeActiveSet() {
+  if (replaySession?.running) return;
   const set = sets[activeSet];
   for (const slot of set.slots) {
     if (slot.type === "single") {
@@ -1675,7 +2018,661 @@ function setStatus(text, playing = engine.playing) {
   $("#statusLamp").classList.toggle("playing", playing);
 }
 
+function formatReplayTime(seconds) {
+  const whole = Math.max(0, Math.floor(seconds));
+  return `${String(Math.floor(whole / 60)).padStart(2, "0")}:${String(whole % 60).padStart(2, "0")}`;
+}
+
+function buildReplayPadDisplay() {
+  const container = $("#replayPadState");
+  for (const { bit, label } of REPLAY_PAD_DISPLAY) {
+    const key = document.createElement("span");
+    key.className = "replay-pad-key";
+    key.dataset.padBit = String(bit);
+    key.textContent = label;
+    key.setAttribute("aria-hidden", "true");
+    container.append(key);
+  }
+}
+
+function renderReplayPadState(mask = 0) {
+  const activeLabels = [];
+  $$(".replay-pad-key").forEach((key) => {
+    const active = Boolean(mask & Number(key.dataset.padBit));
+    key.classList.toggle("active", active);
+    if (active) activeLabels.push(key.textContent);
+  });
+  $("#replayPadState").setAttribute(
+    "aria-label",
+    activeLabels.length > 0
+      ? `現在押されているリプレイボタン: ${activeLabels.join("、")}`
+      : "現在押されているリプレイボタンはありません",
+  );
+}
+
+function setReplayUiLocked(locked) {
+  document.body.classList.toggle("replay-running", locked);
+  $$(".set-section button, .set-section select, .slots-section button, .slots-section select, .tech-section button")
+    .forEach((control) => { control.disabled = locked; });
+  $$(".replay-choice").forEach((button) => { button.disabled = locked; });
+  $("#replayStartButton").disabled = locked;
+  $("#replayStopButton").disabled = !locked;
+  $("#replayStartButton").textContent = locked ? "REPLAY中" : "▶ REPLAY";
+}
+
+function renderReplayIndicators() {
+  const session = replaySession;
+  $$(".set-button").forEach((button, index) => {
+    button.classList.toggle("active", index === (session?.currentSet ?? activeSet));
+    button.classList.toggle("replay-target", Boolean(session && index === session.targetSet));
+  });
+  for (const tech of REPLAY_TECHS) {
+    const control = tech.selector ? $(tech.selector) : null;
+    control?.classList.toggle("replay-selected", Boolean(session && tech === REPLAY_TECHS[session.selectedTech]));
+    control?.classList.toggle("replay-active", Boolean(session?.techHeld && tech === REPLAY_TECHS[session.selectedTech]));
+  }
+  if (!session) {
+    $("#replayOperation").textContent = "リプレイを選択してください";
+    return;
+  }
+  const tech = REPLAY_TECHS[session.selectedTech];
+  $("#replayOperation").textContent = `PLAY ${SET_NAMES[session.currentSet]} · CHANGE ${SET_NAMES[session.targetSet]} · TECH ${tech.label}`;
+}
+
+function updateReplayProgress(frame = 0) {
+  const session = replaySession;
+  if (!session) return;
+  const currentSeconds = Math.min(frame, session.replay.frameCount) / REPLAY_FPS;
+  $("#replayProgress").max = session.replay.frameCount;
+  $("#replayProgress").value = Math.min(frame, session.replay.frameCount);
+  $("#replayTime").textContent = `${formatReplayTime(currentSeconds)} / ${formatReplayTime(session.replay.durationSeconds)}`;
+}
+
+function selectReplayTech(index) {
+  const session = replaySession;
+  if (!session) return;
+  const next = (index + REPLAY_TECHS.length) % REPLAY_TECHS.length;
+  if (next === session.selectedTech) return;
+  if (session.techHeld) setReplayTechHeld(false);
+  session.selectedTech = next;
+  renderReplayIndicators();
+}
+
+function selectReplayAudioTech(index) {
+  const session = replaySession;
+  if (!session) return;
+  session.audioSelectedTech = (
+    index + REPLAY_TECHS.length
+  ) % REPLAY_TECHS.length;
+}
+
+function createReplayDirectionCounters() {
+  return Object.fromEntries(
+    REPLAY_DIRECTION_CALLBACKS.map(({ bit }) => [bit, 0]),
+  );
+}
+
+function advanceReplayDirectionCounters(mask, counters) {
+  const callbacks = [];
+  for (const direction of REPLAY_DIRECTION_CALLBACKS) {
+    const heldFrames = counters[direction.bit];
+    if (mask & direction.bit) {
+      if (heldFrames % REPLAY_DIRECTION_REPEAT_FRAMES === 0) {
+        callbacks.push(direction);
+      }
+      counters[direction.bit] = heldFrames + 1;
+    } else {
+      counters[direction.bit] = 0;
+    }
+  }
+  return callbacks;
+}
+
+function queueReplaySelection(kind, delta) {
+  const session = replaySession;
+  if (!session) return;
+  session.selectionQueues[kind].push(delta);
+  document.body.classList.add(`replay-${kind}-pending`);
+  if (session.selectionTimers[kind] !== null) return;
+
+  const applyNext = () => {
+    if (replaySession !== session) return;
+    const nextDelta = session.selectionQueues[kind].shift();
+    if (kind === "change") {
+      const targetSlot = session.chunkSelector ^ 1;
+      session.chunkSlots[targetSlot] = (session.chunkSlots[targetSlot] + nextDelta + 8) % 8;
+      session.targetSet = session.chunkSlots[targetSlot];
+      renderReplayIndicators();
+    } else {
+      selectReplayTech(session.selectedTech + nextDelta);
+    }
+    if (session.selectionQueues[kind].length > 0) {
+      session.selectionTimers[kind] = window.setTimeout(applyNext, REPLAY_SELECTION_LAG_MS);
+    } else {
+      session.selectionTimers[kind] = null;
+      document.body.classList.remove(`replay-${kind}-pending`);
+    }
+  };
+
+  session.selectionTimers[kind] = window.setTimeout(applyNext, REPLAY_SELECTION_LAG_MS);
+}
+
+function configureReplayTechVariant(
+  name,
+  variant,
+  effectiveTime = null,
+  replayEndTime = null,
+) {
+  const setting = replaySession?.replay.techSettings?.[name] ?? 0;
+  if (name === "delay" || name === "bpm" || name === "reverb" || name === "interrupt") {
+    engine.setTechVariant(name, variant, effectiveTime);
+  } else if (name === "stb") {
+    engine.setStbPattern(setting, variant, effectiveTime);
+  } else if (name === "fill") {
+    engine.setFillPattern(setting, variant, effectiveTime, replayEndTime);
+  } else if (name === "arp") {
+    engine.setArpPattern(setting, variant, effectiveTime);
+  } else if (name === "flsh") {
+    engine.setFlshPattern(setting, variant, effectiveTime);
+  } else if (name === "mrg") {
+    engine.setMrgPattern(setting, variant, effectiveTime);
+  }
+}
+
+function setReplayTechHeld(held, variant = null) {
+  const session = replaySession;
+  if (!session) return;
+  const techName = REPLAY_TECHS[session.selectedTech].name;
+  if (!held) {
+    if (!session.techHeld) return;
+    session.techHeld = false;
+    session.activeTechName = null;
+    session.techVariant = null;
+    renderReplayIndicators();
+    return;
+  }
+
+  const nextVariant = Math.max(0, Math.min(3, Number(variant)));
+  if (
+    session.techHeld
+    && session.activeTechName === techName
+    && session.techVariant === nextVariant
+  ) return;
+  session.techHeld = true;
+  session.activeTechName = techName;
+  session.techVariant = nextVariant;
+  renderReplayIndicators();
+}
+
+function queueReplayTechEngineOperation(name, inputTime, operation) {
+  const session = replaySession;
+  if (!session) return;
+  if (name !== "bpm" && name !== "fill") {
+    operation(inputTime);
+    return;
+  }
+  const wait = Math.max(0, (inputTime - engine.context.currentTime) * 1000);
+  const timer = window.setTimeout(() => {
+    session.techOperationTimers.delete(timer);
+    if (replaySession === session && session.running) {
+      operation(name === "fill" ? inputTime : null);
+    }
+  }, wait);
+  session.techOperationTimers.add(timer);
+}
+
+function setReplayAudioTechHeld(
+  held,
+  variant = null,
+  inputTime,
+  replayEndTime = null,
+) {
+  const session = replaySession;
+  if (!session) return;
+  const techName = REPLAY_TECHS[session.audioSelectedTech].name;
+  if (!held) {
+    if (!session.audioTechHeld) return;
+    const previousName = session.audioActiveTechName;
+    if (previousName) {
+      queueReplayTechEngineOperation(
+        previousName,
+        inputTime,
+        (effectiveTime) => engine.setTech(previousName, false, effectiveTime),
+      );
+    }
+    session.audioTechHeld = false;
+    session.audioActiveTechName = null;
+    session.audioTechVariant = null;
+    return;
+  }
+
+  const nextVariant = Math.max(0, Math.min(3, Number(variant)));
+  if (
+    session.audioTechHeld
+    && session.audioActiveTechName === techName
+    && session.audioTechVariant === nextVariant
+  ) return;
+  const previousName = session.audioActiveTechName;
+  const wasHeld = session.audioTechHeld && previousName === techName;
+  if (session.audioTechHeld && previousName !== techName && previousName) {
+    queueReplayTechEngineOperation(
+      previousName,
+      inputTime,
+      (effectiveTime) => engine.setTech(previousName, false, effectiveTime),
+    );
+  }
+  session.audioTechHeld = true;
+  session.audioActiveTechName = techName;
+  session.audioTechVariant = nextVariant;
+  if (techName) {
+    queueReplayTechEngineOperation(techName, inputTime, (effectiveTime) => {
+      configureReplayTechVariant(
+        techName,
+        nextVariant,
+        effectiveTime,
+        replayEndTime,
+      );
+      if (!wasHeld) {
+        engine.setTech(
+          techName,
+          true,
+          effectiveTime,
+          techName === "fill"
+            ? { replay: true, endTime: replayEndTime }
+            : null,
+        );
+      }
+    });
+  }
+}
+
+function findReplayTechHoldEndTime(startFrame) {
+  const session = replaySession;
+  if (!session) return Number.POSITIVE_INFINITY;
+  for (let frame = startFrame + 1; frame < session.replay.frameCount; frame += 1) {
+    const mask = session.replay.frames[frame];
+    const hasDirection = REPLAY_TECH_DIRECTIONS.some(({ bit }) => mask & bit);
+    if ((mask & PAD.SQUARE) || !hasDirection) {
+      return session.startTime + frame / REPLAY_FPS;
+    }
+  }
+  return session.startTime + session.replay.frameCount / REPLAY_FPS;
+}
+
+function updateReplayAudioTechDirections(mask, previousMask, inputTime, frame) {
+  const session = replaySession;
+  if (!session) return;
+  const squareHeld = Boolean(mask & PAD.SQUARE);
+  const activeDirections = squareHeld
+    ? []
+    : REPLAY_TECH_DIRECTIONS.filter(({ bit }) => mask & bit);
+  if (activeDirections.length === 0) {
+    setReplayAudioTechHeld(false, null, inputTime);
+    return;
+  }
+  const newlyPressed = activeDirections.filter(({ bit }) => !(previousMask & bit));
+  if (newlyPressed.length > 0) {
+    setReplayAudioTechHeld(
+      true,
+      newlyPressed.at(-1).variant,
+      inputTime,
+      findReplayTechHoldEndTime(frame),
+    );
+  }
+}
+
+function updateReplayTechDirections(mask, previousMask) {
+  const session = replaySession;
+  if (!session) return;
+  const squareHeld = Boolean(mask & PAD.SQUARE);
+  const activeDirections = squareHeld
+    ? []
+    : REPLAY_TECH_DIRECTIONS.filter(({ bit }) => mask & bit);
+  session.techDirectionStack = activeDirections.map(({ bit }) => bit);
+  if (activeDirections.length === 0) {
+    setReplayTechHeld(false);
+    return;
+  }
+
+  // SDED.OX changes the TECH parameter only on a direction's press callback.
+  // Releasing the most recently pressed direction while another is still held
+  // does not reactivate that older direction's parameter.
+  const newlyPressed = activeDirections.filter(({ bit }) => !(previousMask & bit));
+  if (newlyPressed.length > 0) {
+    setReplayTechHeld(true, newlyPressed.at(-1).variant);
+  }
+}
+
+function activateReplayAudioChunk(inputTime) {
+  const session = replaySession;
+  if (!session) return;
+  session.audioCurrentSet = session.audioChunkSlots[session.audioChunkSelector];
+  session.audioTargetSet = session.audioChunkSlots[session.audioChunkSelector ^ 1];
+  session.audioLiveSet = session.audioSetStates[session.audioCurrentSet];
+  // CROSS changes songs immediately in SDED.OX, restoring the new song at
+  // the old song's current sequence position.
+  engine.preserveClockRescheduleAt(inputTime);
+}
+
+function activateReplayDisplayChunk() {
+  const session = replaySession;
+  if (!session) return;
+  session.currentSet = session.chunkSlots[session.chunkSelector];
+  session.targetSet = session.chunkSlots[session.chunkSelector ^ 1];
+  session.liveSet = session.setStates[session.currentSet];
+  session.revision += 1;
+  renderedSequenceKey = "";
+  renderSlots();
+  renderReplayIndicators();
+}
+
+function scheduleReplayAudioPad(mask, previousMask, inputTime, frame) {
+  const session = replaySession;
+  if (!session) return;
+  const rising = (bit) => Boolean((mask & bit) && !(previousMask & bit));
+  const directionCallbacks = advanceReplayDirectionCounters(
+    mask,
+    session.audioDirectionCounters,
+  );
+  let audioChanged = false;
+  REPLAY_SHOULDER_BITS.forEach((bit, index) => {
+    if (!rising(bit)) return;
+    const slot = session.audioLiveSet.slots[index];
+    if (slot.type === "single") {
+      slot.enabled = !slot.enabled;
+    } else {
+      slot.itemEnabled = slot.itemEnabled.map((enabled) => !enabled);
+      slot.enabled = slot.itemEnabled.some(Boolean);
+    }
+    audioChanged = true;
+  });
+
+  if (mask & PAD.SQUARE) {
+    for (const { selection, delta } of directionCallbacks) {
+      if (selection === "change") {
+        const targetSlot = session.audioChunkSelector ^ 1;
+        session.audioChunkSlots[targetSlot] = (
+          session.audioChunkSlots[targetSlot] + delta + 8
+        ) % 8;
+        session.audioTargetSet = session.audioChunkSlots[targetSlot];
+      } else {
+        selectReplayAudioTech(session.audioSelectedTech + delta);
+      }
+    }
+  }
+
+  if (rising(PAD.CROSS) && session.audioCurrentSet !== session.audioTargetSet) {
+    session.audioChunkSelector ^= 1;
+    activateReplayAudioChunk(inputTime);
+  }
+  if (rising(PAD.CIRCLE)) engine.cue(inputTime);
+  updateReplayAudioTechDirections(mask, previousMask, inputTime, frame);
+
+  if (audioChanged) {
+    engine.preserveClockRescheduleAt(inputTime);
+  }
+}
+
+function applyReplayPad(mask, previousMask) {
+  const session = replaySession;
+  if (!session) return;
+  renderReplayPadState(mask);
+  const rising = (bit) => Boolean((mask & bit) && !(previousMask & bit));
+  const directionCallbacks = advanceReplayDirectionCounters(
+    mask,
+    session.directionCounters,
+  );
+  let shoulderChanged = false;
+  REPLAY_SHOULDER_BITS.forEach((bit, index) => {
+    if (!rising(bit)) return;
+    const slot = session.liveSet.slots[index];
+    if (slot.type === "single") {
+      slot.enabled = !slot.enabled;
+    } else {
+      slot.itemEnabled = slot.itemEnabled.map((enabled) => !enabled);
+      slot.enabled = slot.itemEnabled.some(Boolean);
+    }
+    shoulderChanged = true;
+  });
+
+  if (mask & PAD.SQUARE) {
+    for (const { selection, delta } of directionCallbacks) {
+      queueReplaySelection(selection, delta);
+    }
+  }
+
+  if (rising(PAD.CROSS)) {
+    if (session.currentSet !== session.targetSet) {
+      session.chunkSelector ^= 1;
+      activateReplayDisplayChunk();
+    }
+  }
+  updateReplayTechDirections(mask, previousMask);
+
+  if (shoulderChanged) {
+    session.revision += 1;
+    renderedSequenceKey = "";
+    renderSlots();
+  }
+}
+
+function finishReplay(message = "リプレイを停止しました") {
+  const session = replaySession;
+  if (!session) return;
+  cancelAnimationFrame(session.animationFrame);
+  if (session.inputTimer !== null) window.clearTimeout(session.inputTimer);
+  if (session.audioInputTimer !== null) window.clearTimeout(session.audioInputTimer);
+  for (const timer of session.techOperationTimers) window.clearTimeout(timer);
+  session.techOperationTimers.clear();
+  for (const timer of Object.values(session.selectionTimers)) {
+    if (timer !== null) window.clearTimeout(timer);
+  }
+  document.body.classList.remove("replay-change-pending", "replay-tech-pending");
+  setReplayTechHeld(false);
+  if (session.audioActiveTechName) {
+    engine.setTech(session.audioActiveTechName, false);
+  }
+  replaySession = null;
+  renderReplayPadState(0);
+  setReplayUiLocked(false);
+  if (engine.playing) engine.stop();
+  $("#playButton").textContent = "▶ PLAY";
+  $("#playButton").classList.remove("stop");
+  renderedSequenceKey = "";
+  renderSlots();
+  renderReplayIndicators();
+  updatePosition(engine.pausedTick);
+  setStatus(message, false);
+}
+
+function scheduleReplayAudioThrough(targetFrame) {
+  const session = replaySession;
+  if (!session?.running) return;
+  const lastFrame = Math.min(session.replay.frameCount - 1, targetFrame);
+  while (session.scheduledFrame <= lastFrame) {
+    const inputTime = session.startTime + session.scheduledFrame / REPLAY_FPS;
+    const mask = session.replay.frames[session.scheduledFrame];
+    scheduleReplayAudioPad(
+      mask,
+      session.audioPreviousMask,
+      inputTime,
+      session.scheduledFrame,
+    );
+    session.audioPreviousMask = mask;
+    session.scheduledFrame += 1;
+  }
+}
+
+function processReplayAudioInput() {
+  const session = replaySession;
+  if (!session?.running) return;
+  const scheduleTime = engine.context.currentTime + REPLAY_INPUT_LOOKAHEAD_SECONDS;
+  const elapsed = scheduleTime - session.startTime;
+  if (elapsed >= 0) {
+    scheduleReplayAudioThrough(Math.floor(elapsed * REPLAY_FPS));
+  }
+  if (session.scheduledFrame >= session.replay.frameCount) {
+    session.audioInputTimer = null;
+    return;
+  }
+  const nextInputTime = session.startTime + session.scheduledFrame / REPLAY_FPS;
+  const nextWakeTime = nextInputTime - REPLAY_INPUT_LOOKAHEAD_SECONDS;
+  session.audioInputTimer = window.setTimeout(
+    processReplayAudioInput,
+    Math.max(1, (nextWakeTime - engine.context.currentTime) * 1000),
+  );
+}
+
+function processReplayInput() {
+  const session = replaySession;
+  if (!session?.running) return;
+  const now = engine.context.currentTime;
+  if (now < session.startTime) {
+    session.inputTimer = window.setTimeout(
+      processReplayInput,
+      Math.max(1, (session.startTime - now) * 1000),
+    );
+    return;
+  }
+  const elapsed = now - session.startTime;
+  const targetFrame = Math.min(session.replay.frameCount - 1, Math.floor(elapsed * REPLAY_FPS));
+  // If the browser delayed the look-ahead timer, preserve event ordering and
+  // apply the audio transition before its corresponding visual/input update.
+  scheduleReplayAudioThrough(targetFrame);
+  while (session.processedFrame <= targetFrame) {
+    const mask = session.replay.frames[session.processedFrame];
+    applyReplayPad(mask, session.previousMask);
+    session.previousMask = mask;
+    session.processedFrame += 1;
+  }
+  if (session.processedFrame >= session.replay.frameCount) {
+    session.inputTimer = null;
+    return;
+  }
+  const nextInputTime = session.startTime + session.processedFrame / REPLAY_FPS;
+  session.inputTimer = window.setTimeout(
+    processReplayInput,
+    Math.max(1, (nextInputTime - engine.context.currentTime) * 1000),
+  );
+}
+
+function drawReplay() {
+  const session = replaySession;
+  if (!session?.running) return;
+  const elapsed = Math.max(0, engine.context.currentTime - session.startTime);
+  updateReplayProgress(session.processedFrame);
+  if (elapsed * REPLAY_FPS >= session.replay.frameCount) {
+    finishReplay(`${session.replay.id} リプレイ終了`);
+    return;
+  }
+  session.animationFrame = requestAnimationFrame(drawReplay);
+}
+
+async function loadReplayDefinition(definition) {
+  const response = await fetch(definition.path);
+  if (!response.ok) throw new Error(`${definition.path}: HTTP ${response.status}`);
+  return parseReplay(await response.arrayBuffer(), data, definition.id);
+}
+
+async function startReplay() {
+  if (replaySession?.running) return;
+  const definition = REPLAY_DEFINITIONS.find((candidate) => candidate.id === selectedReplayId);
+  const startButton = $("#replayStartButton");
+  startButton.disabled = true;
+  try {
+    setStatus(`${definition.id} リプレイを読込中`, false);
+    const replay = await loadReplayDefinition(definition);
+    if (engine.playing) engine.stop();
+    await engine.initialize((message) => setStatus(message, false));
+    for (const techName of ENGINE_TECH_NAMES) engine.setTech(techName, false);
+    engine.pausedTick = 0;
+    engine.setBpm(replay.bpm);
+    $("#bpmInput").value = String(replay.bpm);
+    $("#bpmOutput").textContent = String(replay.bpm);
+    const setStates = replay.sets.map(cloneReplaySet);
+    const audioSetStates = replay.sets.map(cloneReplaySet);
+    replaySession = {
+      running: true,
+      replay,
+      setStates,
+      audioSetStates,
+      liveSet: setStates[replay.activeSet],
+      audioLiveSet: audioSetStates[replay.activeSet],
+      chunkSelector: replay.chunkSelector,
+      audioChunkSelector: replay.chunkSelector,
+      chunkSlots: [...replay.chunkSlots],
+      audioChunkSlots: [...replay.chunkSlots],
+      currentSet: replay.activeSet,
+      targetSet: replay.targetSet,
+      audioCurrentSet: replay.activeSet,
+      audioTargetSet: replay.targetSet,
+      selectedTech: replay.selectedTech,
+      audioSelectedTech: replay.selectedTech,
+      techHeld: false,
+      activeTechName: null,
+      techVariant: null,
+      techDirectionStack: [],
+      audioTechHeld: false,
+      audioActiveTechName: null,
+      audioTechVariant: null,
+      techOperationTimers: new Set(),
+      processedFrame: 0,
+      previousMask: 0,
+      revision: 0,
+      animationFrame: 0,
+      inputTimer: null,
+      audioInputTimer: null,
+      scheduledFrame: 0,
+      audioPreviousMask: 0,
+      directionCounters: createReplayDirectionCounters(),
+      audioDirectionCounters: createReplayDirectionCounters(),
+      startTime: 0,
+      selectionQueues: { change: [], tech: [] },
+      selectionTimers: { change: null, tech: null },
+    };
+    setReplayUiLocked(true);
+    renderReplayIndicators();
+    renderSlots();
+    updateReplayProgress(0);
+    await engine.start();
+    replaySession.startTime = engine.originTime;
+    $("#playButton").textContent = "■ STOP";
+    $("#playButton").classList.add("stop");
+    $("#replayTitle").textContent = replay.title;
+    setStatus(`${replay.id} リプレイ再生中`, true);
+    processReplayAudioInput();
+    processReplayInput();
+    replaySession.animationFrame = requestAnimationFrame(drawReplay);
+  } catch (error) {
+    console.error(error);
+    if (replaySession) finishReplay("リプレイを停止しました");
+    setStatus(`リプレイエラー: ${error.message}`, false);
+  } finally {
+    if (!replaySession?.running) startButton.disabled = false;
+  }
+}
+
+function buildReplayButtons() {
+  const container = $("#replayChoices");
+  for (const definition of REPLAY_DEFINITIONS) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `replay-choice${definition.id === selectedReplayId ? " active" : ""}`;
+    button.textContent = definition.id;
+    button.addEventListener("click", () => {
+      selectedReplayId = definition.id;
+      $$(".replay-choice").forEach((candidate) => candidate.classList.toggle("active", candidate === button));
+      $("#replayTitle").textContent = `${definition.id}.DENR`;
+    });
+    container.append(button);
+  }
+}
+
 async function togglePlay() {
+  if (replaySession?.running) {
+    finishReplay("リプレイを停止しました");
+    return;
+  }
   const button = $("#playButton");
   if (engine.playing) {
     engine.stop();
@@ -1699,6 +2696,8 @@ async function togglePlay() {
   }
 }
 
+buildReplayPadDisplay();
+buildReplayButtons();
 buildSetButtons();
 buildSlots();
 buildSequenceRuler();
@@ -1710,6 +2709,8 @@ setStatus("停止中", false);
 
 $("#playButton").addEventListener("click", togglePlay);
 $("#cueButton").addEventListener("click", () => engine.cue());
+$("#replayStartButton").addEventListener("click", startReplay);
+$("#replayStopButton").addEventListener("click", () => finishReplay("リプレイを停止しました"));
 $("#resetSetsButton").addEventListener("click", resetSets);
 $("#randomizeSetButton").addEventListener("click", randomizeActiveSet);
 $("#closeItemPicker").addEventListener("click", () => $("#itemPickerDialog").close());
@@ -1729,24 +2730,11 @@ $("#itemPickerDialog").addEventListener("close", () => {
   itemPickerState = null;
 });
 window.addEventListener("mouseup", (event) => {
-  if (event.button === 1) {
-    endItemSoloHold();
-    endTemporarySetSwitch();
-  } else if (event.button === 0 && altHoldActive) {
-    endItemSoloHold();
-    endTemporarySetSwitch();
-    setTimeout(() => { altHoldActive = false; }, 0);
-  }
+  if (event.button !== 1) return;
+  endItemSoloHold();
+  endTemporarySetSwitch();
 });
-window.addEventListener("click", (event) => {
-  if (altHoldActive) {
-    altHoldActive = false;
-    event.stopImmediatePropagation();
-    event.preventDefault();
-  }
-}, true);
 window.addEventListener("blur", () => {
-  altHoldActive = false;
   endItemSoloHold();
   endTemporarySetSwitch();
 });
@@ -1755,6 +2743,71 @@ $("#bpmInput").addEventListener("input", (event) => {
   engine.setBpm(event.target.value);
 });
 $("#masterVolume").addEventListener("input", (event) => engine.setMaster(Number(event.target.value) / 100));
+
+const TECH_DIRECTION_LABELS = ["←", "↓", "→", "↑"];
+const ORIGINAL_TECH_CONTROL_ORDER = [
+  ".delay-tech-control",
+  ".mod-tech-control",
+  ".reverb-tech-control",
+  ".bpm-tech-control",
+  ".stb-tech-control",
+  ".arp-tech-control",
+  ".flsh-tech-control",
+  ".int-tech-control",
+  ".fill-tech-control",
+  ".mrg-tech-control",
+];
+
+const techControlGrid = $(".tech-buttons");
+for (const selector of ORIGINAL_TECH_CONTROL_ORDER) {
+  const control = $(selector, techControlGrid);
+  if (control) techControlGrid.append(control);
+}
+
+function buildTechSettingMatrix(name, settingCount, titleFor) {
+  const matrix = $(`.${name}-pattern-matrix`);
+  if (!matrix) return;
+  const fragment = document.createDocumentFragment();
+  for (let setting = 0; setting < settingCount; setting += 1) {
+    for (let variant = 0; variant < TECH_DIRECTION_LABELS.length; variant += 1) {
+      const direction = TECH_DIRECTION_LABELS[variant];
+      const button = document.createElement("button");
+      button.className = `${name}-trigger-button`;
+      button.type = "button";
+      button.dataset[`${name}Setting`] = String(setting);
+      button.dataset[`${name}Variant`] = String(variant);
+      button.textContent = `${String(setting + 1).padStart(2, "0")}${direction}`;
+      button.title = titleFor(setting, variant, direction);
+      button.setAttribute("aria-pressed", "false");
+      fragment.append(button);
+    }
+  }
+  matrix.replaceChildren(fragment);
+  matrix.setAttribute(
+    "aria-label",
+    `${name.toUpperCase()} ${settingCount} settings × 4 directions`,
+  );
+}
+
+buildTechSettingMatrix("stb", data.stb.settings.length, (setting, variant, direction) => {
+  const row = data.stb.settings[setting];
+  return `STB ${setting + 1}${direction}: Program ${row.program} / Note ${row.voices[variant].note}`;
+});
+
+buildTechSettingMatrix("arp", data.arp.patterns.length, (setting, variant, direction) => {
+  const pattern = data.arp.patterns[setting];
+  const programOffset = data.arp.directionProgramOffsets[variant];
+  const program = data.arp.variants[pattern.programGroup * 4 + programOffset].program;
+  return `ARP ${setting + 1}${direction}: Program ${program} / ${pattern.events.length} notes / ${pattern.ticks} ticks`;
+});
+
+buildTechSettingMatrix("flsh", data.flsh.settings.length, (setting, variant, direction) => (
+  `FLSH ${setting + 1}${direction}: Program ${data.flsh.settings[setting].program} / ${data.flsh.intervals[variant]} ticks`
+));
+
+buildTechSettingMatrix("mrg", data.mrg.settings.length, (setting, variant, direction) => (
+  `MRG ${setting + 1}${direction}: Program ${data.mrg.settings[setting].program} / Note ${data.mrg.notes[variant]}`
+));
 
 $$('.tech-button').forEach((button) => {
   const name = button.dataset.tech;
@@ -1779,7 +2832,6 @@ $$('.tech-button').forEach((button) => {
     setStatus(enabled ? `TECH ${name.toUpperCase()} 発動中` : (engine.playing ? "演奏中" : "停止中"), enabled || engine.playing);
   };
 
-  button.addEventListener("webkitmouseforcewillbegin", (event) => event.preventDefault());
   button.addEventListener("pointerdown", (event) => {
     if (event.button !== 0) return;
     event.preventDefault();
@@ -1844,7 +2896,6 @@ function bindDirectTechButtons(selector, techName, configure, statusText) {
       }
     };
 
-    button.addEventListener("webkitmouseforcewillbegin", (event) => event.preventDefault());
     button.addEventListener("pointerdown", (event) => {
       if (event.button !== 0) return;
       event.preventDefault();
@@ -1901,6 +2952,13 @@ bindDirectTechButtons(
   "interrupt",
   (button) => engine.setTechVariant("interrupt", button.dataset.intVariant),
   (button) => `INT ${Number(button.dataset.intVariant) + 1} 発動中`,
+);
+
+bindDirectTechButtons(
+  ".stb-trigger-button",
+  "stb",
+  (button) => engine.setStbPattern(button.dataset.stbSetting, button.dataset.stbVariant),
+  (button) => `STB ${Number(button.dataset.stbSetting) + 1}-${Number(button.dataset.stbVariant) + 1} 発動中`,
 );
 
 bindDirectTechButtons(

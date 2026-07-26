@@ -27,7 +27,7 @@
       <span>0: 頭出し</span>
       <span>1–8: セット切替</span>
       <span>Q / W / E / R: L1 / L2 / R1 / R2 ON・OFF</span>
-      <span>ホイール押込 / Alt+クリック: HOLD SOLO</span>
+      <span>ホイール押込: HOLD SOLO</span>
     </aside>
 
     <section class="transport panel" aria-label="トランスポート">
@@ -44,8 +44,32 @@
       </label>
       <div class="master-control">
         <label for="masterVolume">MASTER</label>
-        <input id="masterVolume" type="range" min="0" max="100" value="25">
+        <input id="masterVolume" type="range" min="0" max="100" value="78">
       </div>
+    </section>
+
+    <section class="replay-section panel" aria-label="ディスクリプレイ">
+      <div class="replay-heading">
+        <div>
+          <p class="eyebrow">DENR PAD RECORDING · 30 FPS</p>
+          <h2>ディスクリプレイ</h2>
+        </div>
+        <div id="replayChoices" class="replay-choices" role="group" aria-label="リプレイ選択"></div>
+      </div>
+      <div class="replay-transport">
+        <button id="replayStartButton" class="replay-start-button" type="button">▶ REPLAY</button>
+        <button id="replayStopButton" class="replay-stop-button" type="button" disabled>■ STOP</button>
+        <div class="replay-monitor">
+          <div><strong id="replayTitle">FMY.DENR</strong><span id="replayTime">00:00 / 00:00</span></div>
+          <progress id="replayProgress" value="0" max="1"></progress>
+          <small id="replayOperation">リプレイを選択してください</small>
+        </div>
+      </div>
+      <div class="replay-pad-monitor">
+        <small>PAD INPUT</small>
+        <div id="replayPadState" class="replay-pad-state" aria-label="現在押されているリプレイボタン"></div>
+      </div>
+      <p class="replay-note">L1/L2/R1/R2＝ON/OFF · □＋←→＝CHANGEチャンク · □＋↑↓＝TECH選択 · ←↓↑→＝TECH 1–4 HOLD · ×＝CHANGE切替 · ○＝頭出し</p>
     </section>
 
     <section class="set-section panel" aria-label="音ネタセット">
@@ -65,6 +89,31 @@
 
     <section class="slots-section" aria-label="演奏スロット">
       <div id="slotGrid" class="slot-grid"></div>
+    </section>
+
+    <section class="sequence-section panel" aria-label="16ステップシーケンス">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">SPTN STEP MONITOR</p>
+          <h2>16ビート表示</h2>
+        </div>
+        <p id="sequencePosition" class="sequence-position">BAR 001 · STEP 01</p>
+      </div>
+      <div class="sequence-legend" aria-hidden="true">
+        <span><i class="legend-hit"></i>発音</span>
+        <span><i class="legend-length"></i>音価</span>
+        <span><i class="legend-interrupted"></i>INT CUT</span>
+        <span>点の大きさ＝音量</span>
+      </div>
+      <div class="sequence-scroll">
+        <div class="sequence-board">
+          <div class="sequence-ruler">
+            <span>CHANNEL / BAR</span>
+            <div id="sequenceSteps" class="sequence-steps"></div>
+          </div>
+          <div id="sequenceGrid" class="sequence-grid"></div>
+        </div>
+      </div>
     </section>
 
     <section class="tech-section panel" aria-label="TECH">
@@ -90,6 +139,12 @@
             <button class="delay-trigger-button" data-delay-variant="3" title="DLY 4: 48 tick / 1/4"
               type="button">1/4</button>
           </div>
+        </div>
+        <div class="tech-control mod-tech-control unavailable-tech-control" aria-disabled="true">
+          <div class="direct-tech-heading">
+            <span>MOD</span><small>Modulation — 原作順を示す未実装TECH</small>
+          </div>
+          <p class="tech-unavailable">NOT IMPLEMENTED</p>
         </div>
         <div class="tech-control bpm-tech-control">
           <div class="direct-tech-heading">
@@ -121,6 +176,12 @@
             <button class="reverb-trigger-button" data-reverb-variant="3" title="REV 4: original depth 127"
               type="button">4</button>
           </div>
+        </div>
+        <div class="tech-control stb-tech-control">
+          <div class="direct-tech-heading">
+            <span>STB</span><small>Stab — 短い音を即座に重ねる（14設定×4方向）</small>
+          </div>
+          <div class="stb-pattern-matrix" role="group" aria-label="STB 56 voices"></div>
         </div>
         <div class="tech-control arp-tech-control">
           <div class="direct-tech-heading">
@@ -251,7 +312,7 @@
             <button class="int-trigger-button" data-int-variant="2" title="INT 3: 12 tick gate"
               type="button">1/16</button>
             <button class="int-trigger-button" data-int-variant="3" title="INT 4: 8 tick gate"
-              type="button">1/8T</button>
+              type="button">1/16T</button>
           </div>
         </div>
         <div class="tech-control fill-tech-control">
@@ -296,29 +357,6 @@
       </div>
     </section>
 
-    <section class="sequence-section panel" aria-label="16ステップシーケンス">
-      <div class="section-heading">
-        <div>
-          <p class="eyebrow">SPTN STEP MONITOR</p>
-          <h2>16ビート表示</h2>
-        </div>
-        <p id="sequencePosition" class="sequence-position">BAR 001 · STEP 01</p>
-      </div>
-      <div class="sequence-legend" aria-hidden="true">
-        <span><i class="legend-hit"></i>発音</span>
-        <span><i class="legend-length"></i>音価</span>
-        <span><i class="legend-interrupted"></i>INT CUT</span>
-        <span>点の大きさ＝音量</span>
-      </div>
-      <div class="sequence-scroll">
-        <div class="sequence-board">
-          <div class="sequence-ruler">
-            <span>CHANNEL / BAR</span>
-            <div id="sequenceSteps" class="sequence-steps"></div>
-          </div>
-          <div id="sequenceGrid" class="sequence-grid"></div>
-        </div>
-      </div>
   </main>
 
   <template id="singleSlotTemplate">
@@ -378,7 +416,7 @@
       </div>
       <div class="item-picker-result-heading">
         <span id="itemPickerCount">0 ITEMS</span>
-        <span>🔊＝同期試聴 / ホイール押し込み or Alt+クリック＝HOLD SOLO</span>
+        <span>🔊＝同期試聴 / ホイール押し込み＝HOLD SOLO</span>
       </div>
       <div id="itemPickerItems" class="item-picker-items"></div>
     </div>
