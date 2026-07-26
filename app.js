@@ -28,6 +28,13 @@ const DELAY_WET_LEVELS = [0.46, 0.52, 0.58, 0.64];
 const DELAY_FEEDBACK_LEVELS = [0.24, 0.32, 0.4, 0.48];
 const REVERB_DEPTHS = [16, 32, 64, 127];
 const REVERB_PREDELAYS = [0.025, 0.04, 0.065, 0.09];
+// SDED.OX drives a signed 256-sample triangle pitch LFO at 60 Hz.  Its phase
+// advances by floor(400 * 1024 / 3600) = 113 of 1024 units per frame.
+const MOD_DEPTHS = [48, 72, 96, 127];
+const MOD_LFO_FREQUENCY = (60 * 113) / 1024;
+const MOD_DEPTH_CENTS = MOD_DEPTHS.map(
+  (depth) => (depth * 127 * 200) / (128 * 128),
+);
 // SDED.OX uses a Q7 tempo multiplier: 128 is normal speed, clamped to
 // 16..512.  The four BPM TECH variants add these values once per 60 Hz frame.
 const BPM_TECH_STEPS = [-3, -9, 3, 9];
@@ -54,12 +61,11 @@ const REPLAY_SELECTION_LAG_MS = 90;
 // not restart the direction's counter.
 const REPLAY_DIRECTION_REPEAT_FRAMES = 8;
 const REPLAY_SHOULDER_BITS = [PAD.L1, PAD.L2, PAD.R1, PAD.R2];
-const ENGINE_TECH_NAMES = ["delay", "bpm", "reverb", "stb", "arp", "flsh", "mrg", "interrupt", "fill"];
-// Exact order of the ten labels in SDED.OX.  MOD remains unmapped until its
-// original routine is identified with confidence.
+const ENGINE_TECH_NAMES = ["delay", "mod", "bpm", "reverb", "stb", "arp", "flsh", "mrg", "interrupt", "fill"];
+// Exact order of the ten labels in SDED.OX.
 const REPLAY_TECHS = [
   { name: "delay", label: "DLY", selector: ".delay-tech-control" },
-  { name: null, label: "MOD", selector: ".mod-tech-control" },
+  { name: "mod", label: "MOD", selector: ".mod-tech-control" },
   { name: "reverb", label: "REV", selector: ".reverb-tech-control" },
   { name: "bpm", label: "BPM", selector: ".bpm-tech-control" },
   { name: "stb", label: "STB", selector: ".stb-tech-control" },
@@ -129,8 +135,10 @@ class GrooveEngine {
     this.cueRequestTimer = null;
     this.cueRequestTime = null;
     this.getTracks = () => [];
-    this.tech = { delay: false, bpm: false, reverb: false, interrupt: false, fill: false, stb: false, arp: false, flsh: false, mrg: false };
-    this.techVariant = { delay: 1, bpm: 0, reverb: 2, interrupt: 2, fill: 3, stb: 0, arp: 0, flsh: 0, mrg: 0 };
+    this.tech = { delay: false, mod: false, bpm: false, reverb: false, interrupt: false, fill: false, stb: false, arp: false, flsh: false, mrg: false };
+    this.techVariant = { delay: 1, mod: 0, bpm: 0, reverb: 2, interrupt: 2, fill: 3, stb: 0, arp: 0, flsh: 0, mrg: 0 };
+    this.modOscillator = null;
+    this.modDepthGain = null;
     this.bpmTechScale = BPM_TECH_NORMAL;
     this.bpmTechLastTime = null;
     this.bpmTechReturning = false;
@@ -346,6 +354,57 @@ class GrooveEngine {
     }
   }
 
+  connectModToSource(record) {
+    if (!this.modDepthGain || !record?.source?.detune) return;
+    if (record.modDepthGain === this.modDepthGain) return;
+    this.modDepthGain.connect(record.source.detune);
+    record.modDepthGain = this.modDepthGain;
+  }
+
+  startMod(time) {
+    if (!this.context) return;
+    const startTime = Math.max(Number(time), this.context.currentTime);
+    if (!this.modOscillator) {
+      const oscillator = this.context.createOscillator();
+      const depthGain = this.context.createGain();
+      oscillator.type = "triangle";
+      oscillator.frequency.setValueAtTime(MOD_LFO_FREQUENCY, startTime);
+      depthGain.gain.setValueAtTime(
+        MOD_DEPTH_CENTS[this.techVariant.mod],
+        startTime,
+      );
+      oscillator.connect(depthGain);
+      oscillator.start(startTime);
+      this.modOscillator = oscillator;
+      this.modDepthGain = depthGain;
+      for (const record of this.activeSources) this.connectModToSource(record);
+      return;
+    }
+    this.setModDepth(startTime);
+  }
+
+  setModDepth(time) {
+    if (!this.modDepthGain) return;
+    const depth = MOD_DEPTH_CENTS[this.techVariant.mod];
+    this.modDepthGain.gain.cancelScheduledValues(time);
+    this.modDepthGain.gain.setValueAtTime(depth, time);
+  }
+
+  stopMod(time) {
+    if (!this.modOscillator || !this.modDepthGain) return;
+    const oscillator = this.modOscillator;
+    const depthGain = this.modDepthGain;
+    this.modOscillator = null;
+    this.modDepthGain = null;
+    depthGain.gain.cancelScheduledValues(time);
+    depthGain.gain.setValueAtTime(0, time);
+    try { oscillator.stop(time); } catch { /* already stopped */ }
+    oscillator.addEventListener("ended", () => {
+      oscillator.disconnect();
+      depthGain.disconnect();
+    }, { once: true });
+  }
+
   tickAtTime(time) {
     return this.originTick + (time - this.originTime) * this.ticksPerSecond();
   }
@@ -368,6 +427,7 @@ class GrooveEngine {
     if (this.tech.arp) this.armArp(this.originTick);
     this.resetInterruptState(this.originTick, false);
     if (this.tech.fill) this.prepareFillTrigger(this.originTick);
+    if (this.tech.mod && !this.modOscillator) this.startMod(this.originTime);
     this.schedulerTimer = window.setInterval(() => this.schedule(), SCHEDULER_INTERVAL_MS);
     this.schedule();
     if (this.tech.stb) this.startStb();
@@ -596,6 +656,10 @@ class GrooveEngine {
       if (enabled && !wasEnabled) this.startMrg(now);
       if (!enabled && wasEnabled) this.stopMrg(now);
     }
+    if (name === "mod") {
+      if (enabled && !wasEnabled) this.startMod(now);
+      if (!enabled && wasEnabled) this.stopMod(now);
+    }
     if (name === "bpm") {
       if (enabled) {
         this.bpmTechReturning = false;
@@ -640,6 +704,9 @@ class GrooveEngine {
     }
     if (name === "bpm") {
       this.bpmTechReleaseStep = Math.abs(BPM_TECH_STEPS[this.techVariant.bpm]) * 2;
+    }
+    if (name === "mod" && this.tech.mod) {
+      this.setModDepth(interruptNow);
     }
   }
 
@@ -1326,6 +1393,7 @@ class GrooveEngine {
       naturalStopTime,
       interruptReleaseTime: null,
     };
+    if (sourceSet === this.activeSources) this.connectModToSource(record);
     sourceSet.add(record);
     source.addEventListener("ended", () => sourceSet.delete(record), { once: true });
     if (pulse) this.pulseMeter(meter, startTime, level);
@@ -2164,7 +2232,7 @@ function configureReplayTechVariant(
   replayEndTime = null,
 ) {
   const setting = replaySession?.replay.techSettings?.[name] ?? 0;
-  if (name === "delay" || name === "bpm" || name === "reverb" || name === "interrupt") {
+  if (name === "delay" || name === "mod" || name === "bpm" || name === "reverb" || name === "interrupt") {
     engine.setTechVariant(name, variant, effectiveTime);
   } else if (name === "stb") {
     engine.setStbPattern(setting, variant, effectiveTime);
@@ -2931,6 +2999,13 @@ bindDirectTechButtons(
   "delay",
   (button) => engine.setTechVariant("delay", button.dataset.delayVariant),
   (button) => `DLY ${Number(button.dataset.delayVariant) + 1} 発動中`,
+);
+
+bindDirectTechButtons(
+  ".mod-trigger-button",
+  "mod",
+  (button) => engine.setTechVariant("mod", button.dataset.modVariant),
+  (button) => `MOD ${TECH_DIRECTION_LABELS[Number(button.dataset.modVariant)]} 発動中`,
 );
 
 bindDirectTechButtons(
