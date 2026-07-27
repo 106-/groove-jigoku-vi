@@ -18,11 +18,17 @@ const LOOKAHEAD_SECONDS = 0.14;
 const SCHEDULER_INTERVAL_MS = 25;
 const REPLAY_INPUT_LOOKAHEAD_SECONDS = 0.05;
 const IMMEDIATE_AUDIO_MARGIN_SECONDS = 0.002;
-const REPLAY_FILL_TIMER_LEAD_SECONDS = 0.012;
+// Wake well before the fill boundary so the retrigger cut lands on its exact
+// audio timestamp even when the main thread is busy; 12 ms proved too tight.
+const REPLAY_FILL_TIMER_LEAD_SECONDS = 0.05;
 const CUE_QUANTIZE_TICKS = 24;
 const CUE_IMMEDIATE_WINDOW_TICKS = 7;
 const INTERRUPT_INTERVALS = [48, 24, 12, 8];
 const INTERRUPT_RELEASE_SECONDS = IMMEDIATE_AUDIO_MARGIN_SECONDS;
+// The SPU keys voices off through their ADSR release instead of muting them.
+// Forced cuts (chunk change, cue, fill reset, stop) use each voice's own
+// VAB release; this constant is only the fallback for voices without one.
+const CANCEL_RELEASE_SECONDS = 0.008;
 const DELAY_BEAT_RATIOS = [0.25, 0.5, 2 / 3, 1];
 const DELAY_WET_LEVELS = [0.46, 0.52, 0.58, 0.64];
 const DELAY_FEEDBACK_LEVELS = [0.24, 0.32, 0.4, 0.48];
@@ -114,6 +120,9 @@ class GrooveEngine {
     this.initializationPromise = null;
     this.buffers = new Map();
     this.sampleInfo = data.samples;
+    // Per-tone SPU release settings extracted from the VAB (ms is the
+    // full-scale ramp time for linear mode, the time constant for exp mode).
+    this.releases = data.releases ?? [];
     this.items = new Map(data.items.map((item) => [item.id, item]));
     this.ticksPerQuarter = data.meta.ticksPerQuarter;
     this.bpm = data.meta.bpm;
@@ -474,11 +483,14 @@ class GrooveEngine {
     const now = this.context.currentTime;
     const inputTime = Math.max(this.originTime, Number(requestTime ?? now));
     const inputTick = Math.max(0, this.tickAtTime(inputTime));
-    const phase = ((inputTick % CUE_QUANTIZE_TICKS) + CUE_QUANTIZE_TICKS)
-      % CUE_QUANTIZE_TICKS;
+    // The driver honors a pending request only on integer ticks 0..6 of a
+    // 24-tick period, so quantize to the next driver tick before the window
+    // test: a request arriving between ticks 6 and 7 waits a full period.
+    const requestTick = Math.ceil(inputTick - 1e-9);
+    const phase = requestTick % CUE_QUANTIZE_TICKS;
     const targetTick = phase < CUE_IMMEDIATE_WINDOW_TICKS
-      ? inputTick
-      : inputTick + CUE_QUANTIZE_TICKS - phase;
+      ? requestTick
+      : requestTick + CUE_QUANTIZE_TICKS - phase;
     this.cueRequestTime = this.timeAtTick(targetTick);
     // Wake before the quantized boundary so WebAudio can place tick 0 on the
     // exact audio timestamp instead of reacting after a JavaScript timer.
@@ -881,7 +893,7 @@ class GrooveEngine {
         const attack = envelope / 127;
         const level = voice.level * (velocity / 127) * attack;
         this.scheduleNoteAtTime(
-          [0, voice.sampleId, voice.ratio, level, voice.pan, duration],
+          [0, voice.sampleId, voice.ratio, level, voice.pan, duration, voice.release],
           this.timeAtTick(eventTick),
           null,
           this.arpSources,
@@ -953,7 +965,7 @@ class GrooveEngine {
       const startTime = this.timeAtTick(boundary);
       this.releaseFlshSourcesAt(startTime);
       this.scheduleNoteAtTime(
-        [0, setting.sampleId, setting.ratio, setting.level, 0, interval],
+        [0, setting.sampleId, setting.ratio, setting.level, 0, interval, setting.release],
         startTime,
         null,
         this.flshSources,
@@ -1170,11 +1182,18 @@ class GrooveEngine {
   prepareReplayFillTrigger(inputTime, endTime = Number.POSITIVE_INFINITY) {
     this.clearFillTimer();
     const inputTick = Math.max(0, this.tickAtTime(inputTime));
-    const targetTick = Math.ceil(inputTick / CUE_QUANTIZE_TICKS - 1e-9)
+    // SDED.OX (FUN_800b317c) arms the first retrigger with a plain
+    // `tick % 24 == 0` test: the fill waits for the next exact 24-tick
+    // boundary; the seven-tick immediate window belongs to cue/change only.
+    const targetTick = Math.ceil((inputTick - 1e-9) / CUE_QUANTIZE_TICKS)
       * CUE_QUANTIZE_TICKS;
+    const barTicks = this.ticksPerQuarter * 4;
     this.fillState = {
       index: 0,
       targetTick,
+      // Every retrigger seeks (current bar, tick 0), so the loop-bar
+      // registration at the moment the fill lands stays frozen.
+      barStartTick: Math.floor(targetTick / barTicks) * barTicks,
       targetTime: this.timeAtTick(targetTick),
       endTime: Number(endTime ?? Number.POSITIVE_INFINITY),
       aligning: true,
@@ -1253,10 +1272,20 @@ class GrooveEngine {
       targetTime,
       this.context.currentTime + IMMEDIATE_AUDIO_MARGIN_SECONDS,
     );
-    this.resetSequenceForFill(cutTime, 0);
-    const interval = this.advanceFillPattern();
+    // SDED.OX's fill seeks to (current bar, tick 0), keeping the loop-bar
+    // registration, instead of rewinding the whole sequence.
+    this.resetSequenceForFill(cutTime, this.fillState.barStartTick ?? 0);
+    // Chain the next boundary from the theoretical target, not from the
+    // possibly late cutTime, so timer lateness cannot accumulate into the
+    // musical grid.  Boundaries a long stall already passed are skipped.
+    let interval = this.advanceFillPattern();
+    let nextTargetTime = targetTime + interval / this.ticksPerSecond();
+    while (nextTargetTime < this.context.currentTime) {
+      interval = this.advanceFillPattern();
+      nextTargetTime += interval / this.ticksPerSecond();
+    }
     this.fillState.targetTick = interval;
-    this.fillState.targetTime = cutTime + interval / this.ticksPerSecond();
+    this.fillState.targetTime = nextTargetTime;
     this.schedule();
     this.scheduleReplayFillTrigger();
   }
@@ -1352,12 +1381,22 @@ class GrooveEngine {
     );
   }
 
+  releaseInfoFor(index) {
+    const info = this.releases[index];
+    if (!info) return { seconds: 0.025, exp: false, tail: 0.025 };
+    const seconds = info.ms / 1000;
+    const exp = Boolean(info.exp);
+    // An exponential release is audible for roughly seven time constants.
+    return { seconds, exp, tail: exp ? seconds * 7 : seconds };
+  }
+
   scheduleNoteAtTime(event, startTime, meter, sourceSet, pulse = true) {
     const [/* tick */, sampleId, ratio, level, pan, durationTicks] = event;
     const buffer = this.buffers.get(sampleId);
     if (!buffer) return;
     const duration = durationTicks / this.ticksPerSecond();
-    const release = 0.025;
+    const releaseInfo = this.releaseInfoFor(event[6]);
+    const release = releaseInfo.tail;
     const source = this.context.createBufferSource();
     const gain = this.context.createGain();
     const panner = this.context.createStereoPanner();
@@ -1372,7 +1411,11 @@ class GrooveEngine {
     }
     gain.gain.setValueAtTime(Math.max(0.0001, level), startTime);
     gain.gain.setValueAtTime(Math.max(0.0001, level), startTime + duration);
-    gain.gain.linearRampToValueAtTime(0.0001, startTime + duration + release);
+    if (releaseInfo.exp) {
+      gain.gain.setTargetAtTime(0, startTime + duration, releaseInfo.seconds);
+    } else {
+      gain.gain.linearRampToValueAtTime(0.0001, startTime + duration + release);
+    }
     panner.pan.value = pan;
     source.connect(gain).connect(panner).connect(this.mixGain);
     source.start(startTime);
@@ -1388,6 +1431,8 @@ class GrooveEngine {
       startTime,
       level,
       releaseDuration: release,
+      releaseSeconds: releaseInfo.seconds,
+      releaseExp: releaseInfo.exp,
       durationEndTime,
       naturalReleaseEndTime,
       naturalStopTime,
@@ -1453,7 +1498,30 @@ class GrooveEngine {
 
   cancelSourceSet(sourceSet, time) {
     for (const record of sourceSet) {
-      try { record.source.stop(time); } catch { /* already stopped */ }
+      const gain = record.gain?.gain;
+      if (!gain || (record.startTime != null && record.startTime >= time - 1e-5)) {
+        // Not keyed on yet by the cut time: it never sounds, stop silently.
+        try { record.source.stop(time); } catch { /* already stopped */ }
+        continue;
+      }
+      if (typeof gain.cancelAndHoldAtTime === "function") {
+        gain.cancelAndHoldAtTime(time);
+      } else {
+        gain.cancelScheduledValues(time);
+        gain.setValueAtTime(Math.max(0.0001, record.level ?? 0.0001), time);
+      }
+      // Key-off like the SPU: the voice decays along its own VAB-programmed
+      // release curve rather than a fixed fade.
+      const releaseSeconds = record.releaseSeconds ?? CANCEL_RELEASE_SECONDS;
+      const tail = record.releaseExp ? releaseSeconds * 7 : releaseSeconds;
+      if (record.releaseExp) {
+        gain.setTargetAtTime(0, time, releaseSeconds);
+      } else {
+        gain.linearRampToValueAtTime(0.0001, time + tail);
+      }
+      try {
+        record.source.stop(time + tail + 0.005);
+      } catch { /* already stopped */ }
     }
     sourceSet.clear();
   }
@@ -2272,14 +2340,17 @@ function setReplayTechHeld(held, variant = null) {
   renderReplayIndicators();
 }
 
-function queueReplayTechEngineOperation(name, inputTime, operation) {
+function queueReplayTechEngineOperation(name, inputTime, operation, leadSeconds = 0) {
   const session = replaySession;
   if (!session) return;
   if (name !== "bpm" && name !== "fill") {
     operation(inputTime);
     return;
   }
-  const wait = Math.max(0, (inputTime - engine.context.currentTime) * 1000);
+  const wait = Math.max(
+    0,
+    (inputTime - engine.context.currentTime - leadSeconds) * 1000,
+  );
   const timer = window.setTimeout(() => {
     session.techOperationTimers.delete(timer);
     if (replaySession === session && session.running) {
@@ -2333,6 +2404,9 @@ function setReplayAudioTechHeld(
   session.audioActiveTechName = techName;
   session.audioTechVariant = nextVariant;
   if (techName) {
+    // Run the fill press slightly early so the quantized boundary can be
+    // scheduled on its exact audio timestamp; the release keeps zero lead so
+    // a boundary inside the final frames is not cancelled prematurely.
     queueReplayTechEngineOperation(techName, inputTime, (effectiveTime) => {
       configureReplayTechVariant(
         techName,
@@ -2350,7 +2424,7 @@ function setReplayAudioTechHeld(
             : null,
         );
       }
-    });
+    }, techName === "fill" ? REPLAY_FILL_TIMER_LEAD_SECONDS : 0);
   }
 }
 
@@ -2417,9 +2491,55 @@ function activateReplayAudioChunk(inputTime) {
   session.audioCurrentSet = session.audioChunkSlots[session.audioChunkSelector];
   session.audioTargetSet = session.audioChunkSlots[session.audioChunkSelector ^ 1];
   session.audioLiveSet = session.audioSetStates[session.audioCurrentSet];
-  // CROSS changes songs immediately in SDED.OX, restoring the new song at
-  // the old song's current sequence position.
+  // SDED.OX restores the new song at the old song's current sequence
+  // position (FUN_800afac4 reseeks to the live bar/tick pair).
   engine.preserveClockRescheduleAt(inputTime);
+}
+
+function replayChunkSwapTime(inputTime) {
+  // SDED.OX keeps the CROSS change as a pending request (DAT_800cbb5c) that
+  // FUN_800aff24 executes on integer ticks 0..6 of a 24-tick period — the
+  // same window as the cue request.  It is not an immediate switch.
+  const inputTick = Math.max(0, engine.tickAtTime(inputTime));
+  const requestTick = Math.ceil(inputTick - 1e-9);
+  const phase = requestTick % CUE_QUANTIZE_TICKS;
+  const targetTick = phase < CUE_IMMEDIATE_WINDOW_TICKS
+    ? requestTick
+    : requestTick + CUE_QUANTIZE_TICKS - phase;
+  return engine.timeAtTick(targetTick);
+}
+
+function queueReplayAudioChunkSwap(inputTime) {
+  const session = replaySession;
+  // A single pending slot: pressing CROSS again before the window executes
+  // the request does not queue a second switch.
+  if (!session || session.audioChunkSwapTimer !== null) return;
+  const swapTime = replayChunkSwapTime(inputTime);
+  const wait = Math.max(
+    0,
+    (swapTime - engine.context.currentTime - REPLAY_INPUT_LOOKAHEAD_SECONDS) * 1000,
+  );
+  session.audioChunkSwapTimer = window.setTimeout(() => {
+    if (replaySession !== session || !session.running) return;
+    session.audioChunkSwapTimer = null;
+    if (session.audioCurrentSet === session.audioTargetSet) return;
+    session.audioChunkSelector ^= 1;
+    activateReplayAudioChunk(swapTime);
+  }, wait);
+}
+
+function queueReplayDisplayChunkSwap() {
+  const session = replaySession;
+  if (!session || session.displayChunkSwapTimer !== null) return;
+  const now = engine.context.currentTime;
+  const swapTime = replayChunkSwapTime(now);
+  session.displayChunkSwapTimer = window.setTimeout(() => {
+    if (replaySession !== session || !session.running) return;
+    session.displayChunkSwapTimer = null;
+    if (session.currentSet === session.targetSet) return;
+    session.chunkSelector ^= 1;
+    activateReplayDisplayChunk();
+  }, Math.max(0, (swapTime - now) * 1000));
 }
 
 function activateReplayDisplayChunk() {
@@ -2469,10 +2589,7 @@ function scheduleReplayAudioPad(mask, previousMask, inputTime, frame) {
     }
   }
 
-  if (rising(PAD.CROSS) && session.audioCurrentSet !== session.audioTargetSet) {
-    session.audioChunkSelector ^= 1;
-    activateReplayAudioChunk(inputTime);
-  }
+  if (rising(PAD.CROSS)) queueReplayAudioChunkSwap(inputTime);
   if (rising(PAD.CIRCLE)) engine.cue(inputTime);
   updateReplayAudioTechDirections(mask, previousMask, inputTime, frame);
 
@@ -2509,12 +2626,7 @@ function applyReplayPad(mask, previousMask) {
     }
   }
 
-  if (rising(PAD.CROSS)) {
-    if (session.currentSet !== session.targetSet) {
-      session.chunkSelector ^= 1;
-      activateReplayDisplayChunk();
-    }
-  }
+  if (rising(PAD.CROSS)) queueReplayDisplayChunkSwap();
   updateReplayTechDirections(mask, previousMask);
 
   if (shoulderChanged) {
@@ -2530,6 +2642,8 @@ function finishReplay(message = "リプレイを停止しました") {
   cancelAnimationFrame(session.animationFrame);
   if (session.inputTimer !== null) window.clearTimeout(session.inputTimer);
   if (session.audioInputTimer !== null) window.clearTimeout(session.audioInputTimer);
+  if (session.audioChunkSwapTimer !== null) window.clearTimeout(session.audioChunkSwapTimer);
+  if (session.displayChunkSwapTimer !== null) window.clearTimeout(session.displayChunkSwapTimer);
   for (const timer of session.techOperationTimers) window.clearTimeout(timer);
   session.techOperationTimers.clear();
   for (const timer of Object.values(session.selectionTimers)) {
@@ -2690,6 +2804,8 @@ async function startReplay() {
       animationFrame: 0,
       inputTimer: null,
       audioInputTimer: null,
+      audioChunkSwapTimer: null,
+      displayChunkSwapTimer: null,
       scheduledFrame: 0,
       audioPreviousMask: 0,
       directionCounters: createReplayDirectionCounters(),
