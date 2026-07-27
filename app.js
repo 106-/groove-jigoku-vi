@@ -1,12 +1,25 @@
+import { REPLAY_DEFINITIONS, parseReplay } from "./replay.js";
 import {
-  PAD,
-  REPLAY_DEFINITIONS,
-  REPLAY_FPS,
-  cloneReplaySet,
-  parseReplay,
-} from "./replay.js";
+  SET_NAMES,
+  REPLAY_INPUT_LOOKAHEAD_SECONDS,
+  REPLAY_FILL_TIMER_LEAD_SECONDS,
+  CUE_QUANTIZE_TICKS,
+  CUE_IMMEDIATE_WINDOW_TICKS,
+  INTERRUPT_INTERVALS,
+  BPM_TECH_STEPS,
+  BPM_TECH_NORMAL,
+  BPM_TECH_MIN,
+  BPM_TECH_MAX,
+  FILL_PATTERNS,
+  ENGINE_TECH_NAMES,
+  REPLAY_TECHS,
+} from "./constants.js";
+import { convertReplayToTimeline } from "./timeline-convert.js";
+import { timelineSetToSlots, validateTimeline } from "./timeline.js";
+import { createTimelinePlayer } from "./timeline-player.js";
+import { createTimelineRecorder } from "./timeline-recorder.js";
+import { createTimelineEditor } from "./timeline-editor.js";
 
-const SET_NAMES = ["ア", "イ", "ウ", "エ", "オ", "カ", "キ", "ク"];
 const SLOT_SHORTCUTS = [
   { code: "KeyQ", label: "Q" },
   { code: "KeyW", label: "W" },
@@ -16,14 +29,7 @@ const SLOT_SHORTCUTS = [
 const STORAGE_KEY = "groove-desk-v-sets-v1";
 const LOOKAHEAD_SECONDS = 0.14;
 const SCHEDULER_INTERVAL_MS = 25;
-const REPLAY_INPUT_LOOKAHEAD_SECONDS = 0.05;
 const IMMEDIATE_AUDIO_MARGIN_SECONDS = 0.002;
-// Wake well before the fill boundary so the retrigger cut lands on its exact
-// audio timestamp even when the main thread is busy; 12 ms proved too tight.
-const REPLAY_FILL_TIMER_LEAD_SECONDS = 0.05;
-const CUE_QUANTIZE_TICKS = 24;
-const CUE_IMMEDIATE_WINDOW_TICKS = 7;
-const INTERRUPT_INTERVALS = [48, 24, 12, 8];
 const INTERRUPT_RELEASE_SECONDS = IMMEDIATE_AUDIO_MARGIN_SECONDS;
 // The SPU keys voices off through their ADSR release instead of muting them.
 // Forced cuts (chunk change, cue, fill reset, stop) use each voice's own
@@ -41,74 +47,6 @@ const MOD_LFO_FREQUENCY = (60 * 113) / 1024;
 const MOD_DEPTH_CENTS = MOD_DEPTHS.map(
   (depth) => (depth * 127 * 200) / (128 * 128),
 );
-// SDED.OX uses a Q7 tempo multiplier: 128 is normal speed, clamped to
-// 16..512.  The four BPM TECH variants add these values once per 60 Hz frame.
-const BPM_TECH_STEPS = [-3, -9, 3, 9];
-const BPM_TECH_NORMAL = 128;
-const BPM_TECH_MIN = 16;
-const BPM_TECH_MAX = 512;
-const FILL_PATTERNS = [
-  [[48], [24], [12], [6]],
-  [[12, 12, 24], [12], [12, 36], [6]],
-  [[12, 24], [24, 24, 24, 12], [24], [6]],
-  [
-    [12, 12, 24, 24, 24, 6, 6, 12, 24, 12, 24, 12],
-    [6, 6, 24, 24, 12, 12, 24, 12, 24, 6, 6, 24, 12],
-    [24, 24, 6, 6, 24, 24, 12, 24, 12, 12, 12, 12],
-    [6],
-  ],
-];
-// The original UI does not move the CHANGE/TECH cursor on the same frame as
-// the direction press.  Keep the actual CROSS change immediate, but give the
-// two selection cursors a short, queued travel time.
-const REPLAY_SELECTION_LAG_MS = 90;
-// The pad dispatcher calls each held direction on frame 0, then every eight
-// 30 Hz replay frames.  SQUARE only modifies what that callback does; it does
-// not restart the direction's counter.
-const REPLAY_DIRECTION_REPEAT_FRAMES = 8;
-const REPLAY_SHOULDER_BITS = [PAD.L1, PAD.L2, PAD.R1, PAD.R2];
-const ENGINE_TECH_NAMES = ["delay", "mod", "bpm", "reverb", "stb", "arp", "flsh", "mrg", "interrupt", "fill"];
-// Exact order of the ten labels in SDED.OX.
-const REPLAY_TECHS = [
-  { name: "delay", label: "DLY", selector: ".delay-tech-control" },
-  { name: "mod", label: "MOD", selector: ".mod-tech-control" },
-  { name: "reverb", label: "REV", selector: ".reverb-tech-control" },
-  { name: "bpm", label: "BPM", selector: ".bpm-tech-control" },
-  { name: "stb", label: "STB", selector: ".stb-tech-control" },
-  { name: "arp", label: "ARP", selector: ".arp-tech-control" },
-  { name: "flsh", label: "FLSH", selector: ".flsh-tech-control" },
-  { name: "interrupt", label: "INT", selector: ".int-tech-control" },
-  { name: "fill", label: "FIL", selector: ".fill-tech-control" },
-  { name: "mrg", label: "MRG", selector: ".mrg-tech-control" },
-];
-const REPLAY_TECH_DIRECTIONS = [
-  { bit: PAD.LEFT, variant: 0 },
-  { bit: PAD.DOWN, variant: 1 },
-  { bit: PAD.RIGHT, variant: 2 },
-  { bit: PAD.UP, variant: 3 },
-];
-// Callback order in the original pad dispatcher.  The order only matters for
-// diagonals that reach a repeat boundary on the same frame.
-const REPLAY_DIRECTION_CALLBACKS = [
-  { bit: PAD.UP, selection: "tech", delta: -1 },
-  { bit: PAD.DOWN, selection: "tech", delta: 1 },
-  { bit: PAD.RIGHT, selection: "change", delta: 1 },
-  { bit: PAD.LEFT, selection: "change", delta: -1 },
-];
-const REPLAY_PAD_DISPLAY = [
-  { bit: PAD.LEFT, label: "←" },
-  { bit: PAD.DOWN, label: "↓" },
-  { bit: PAD.UP, label: "↑" },
-  { bit: PAD.RIGHT, label: "→" },
-  { bit: PAD.SQUARE, label: "□" },
-  { bit: PAD.CIRCLE, label: "○" },
-  { bit: PAD.CROSS, label: "×" },
-  { bit: PAD.L1, label: "L1" },
-  { bit: PAD.L2, label: "L2" },
-  { bit: PAD.R1, label: "R1" },
-  { bit: PAD.R2, label: "R2" },
-];
-
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 
@@ -143,6 +81,9 @@ class GrooveEngine {
     this.animationFrame = null;
     this.cueRequestTimer = null;
     this.cueRequestTime = null;
+    // Invoked as onSeek(previousTick, newTick, cutTime) whenever the musical
+    // origin jumps (cue execution, fill retrigger).
+    this.onSeek = null;
     this.getTracks = () => [];
     this.tech = { delay: false, mod: false, bpm: false, reverb: false, interrupt: false, fill: false, stb: false, arp: false, flsh: false, mrg: false };
     this.techVariant = { delay: 1, mod: 0, bpm: 0, reverb: 2, interrupt: 2, fill: 3, stb: 0, arp: 0, flsh: 0, mrg: 0 };
@@ -510,12 +451,14 @@ class GrooveEngine {
       requestedTime,
       this.context.currentTime + IMMEDIATE_AUDIO_MARGIN_SECONDS,
     );
+    const previousTick = this.tickAtTime(cutTime);
     this.cancelSources(cutTime);
     this.cancelPreviewSources(cutTime);
     this.cancelSourceSet(this.arpSources, cutTime);
     this.cancelSourceSet(this.flshSources, cutTime);
     this.originTick = 0;
     this.originTime = cutTime;
+    this.onSeek?.(previousTick, 0, cutTime);
     this.scheduledUntilTick = 0;
     this.arpScheduledUntilTick = 0;
     this.flshScheduledUntilTick = 0;
@@ -528,6 +471,19 @@ class GrooveEngine {
     if (this.tech.fill) this.prepareFillTrigger(0);
     this.schedule();
     this.onPosition(0);
+  }
+
+  // Timeline playback hands over exec-exact cue times; no re-quantization.
+  cueExactAt(time) {
+    if (!this.context || !this.playing) return;
+    if (this.cueRequestTimer !== null) window.clearTimeout(this.cueRequestTimer);
+    this.pausedTick = 0;
+    this.cueRequestTime = Number(time);
+    const wait = Math.max(
+      0,
+      (this.cueRequestTime - this.context.currentTime - REPLAY_INPUT_LOOKAHEAD_SECONDS) * 1000,
+    );
+    this.cueRequestTimer = window.setTimeout(() => this.applyCueRequest(), wait);
   }
 
   preserveClockReschedule(delaySeconds = 0.015) {
@@ -1203,6 +1159,23 @@ class GrooveEngine {
     this.scheduleReplayFillTrigger();
   }
 
+  // Seed the replay-mode fill chain mid-hold (timeline playback starting
+  // inside a fill interval).  The caller must already have tech.fill on.
+  resumeReplayFill(state) {
+    this.clearFillTimer();
+    this.fillState = {
+      index: state.index,
+      targetTick: 0,
+      barStartTick: state.barStartTick,
+      targetTime: Number(state.targetTime),
+      endTime: Number(state.endTime ?? Number.POSITIVE_INFINITY),
+      aligning: Boolean(state.aligning),
+      mode: "replay",
+      timer: null,
+    };
+    this.scheduleReplayFillTrigger();
+  }
+
   scheduleReplayFillTrigger() {
     if (
       !this.context
@@ -1239,11 +1212,13 @@ class GrooveEngine {
   }
 
   resetSequenceForFill(cutTime, originTick) {
+    const previousTick = this.tickAtTime(cutTime);
     this.cancelSources(cutTime);
     this.cancelSourceSet(this.arpSources, cutTime);
     this.cancelSourceSet(this.flshSources, cutTime);
     this.originTick = originTick;
     this.originTime = cutTime;
+    this.onSeek?.(previousTick, originTick, cutTime);
     this.pausedTick = originTick;
     this.scheduledUntilTick = originTick;
     this.arpScheduledUntilTick = originTick;
@@ -1571,20 +1546,64 @@ let sets = loadSets();
 let activeSet = 0;
 let heldSetOrigin = null;
 let heldSetButton = null;
-let selectedReplayId = REPLAY_DEFINITIONS[0].id;
-let replaySession = null;
 const slotElements = [];
 let renderedSequenceKey = "";
 
 const engine = new GrooveEngine(data, updatePosition);
 engine.getTracks = getActiveTracks;
 
-function performanceSet() {
-  return replaySession?.liveSet ?? sets[activeSet];
+const LANE_SLOT_INDEX = [0, 1, 2, 2, 3, 3];
+const timelinePlayer = createTimelinePlayer(engine, {
+  setStatus: (message) => setStatus(message, false),
+  applyBpm: (bpm) => {
+    $("#bpmInput").value = String(bpm);
+    $("#bpmOutput").textContent = String(bpm);
+  },
+  lockUi: (locked) => {
+    setReplayUiLocked(locked);
+    $("#playButton").textContent = locked ? "■ STOP" : "▶ PLAY";
+    $("#playButton").classList.toggle("stop", locked);
+  },
+  onEnd: (message) => {
+    renderedSequenceKey = "";
+    renderSlots();
+    renderReplayIndicators();
+    updatePosition(engine.pausedTick);
+    setStatus(message, false);
+  },
+  onStateChange: () => {
+    renderedSequenceKey = "";
+    renderSlots();
+    renderReplayIndicators();
+  },
+});
+
+const timelineRecorder = createTimelineRecorder(engine);
+let onRecordingFinished = null;
+
+function currentTechSetting(name) {
+  return {
+    stb: engine.stbSetting,
+    flsh: engine.flshSetting,
+    mrg: engine.mrgSetting,
+    fill: engine.fillSetting,
+    arp: engine.arpSetting,
+  }[name] ?? 0;
 }
 
-function audioPerformanceSet() {
-  return replaySession?.audioLiveSet ?? sets[activeSet];
+function finishRecordingIfActive() {
+  if (!timelineRecorder.recording) return;
+  const recorded = timelineRecorder.stop();
+  setStatus("収録を終了しました", engine.playing);
+  if (recorded) onRecordingFinished?.(recorded);
+}
+
+function performanceSet() {
+  return timelinePlayer.displaySlots() ?? sets[activeSet];
+}
+
+function replayLocked() {
+  return timelinePlayer.running;
 }
 
 function normalizeSet(set) {
@@ -1618,6 +1637,7 @@ function setItemButton(button, category, selected) {
 function enableWheelSelection(button, getCategory, onSelect) {
   let lastStepTime = -Infinity;
   button.addEventListener("wheel", (event) => {
+    if (timelineRecorder.recording) return;
     const items = byCategory[getCategory()];
     if (event.ctrlKey || event.deltaY === 0 || items.length < 2) return;
     event.preventDefault();
@@ -1650,6 +1670,7 @@ function endItemSoloHold() {
 function enableItemSoloHold(element, getItemIds, getLaneKeys = null) {
   element.addEventListener("mousedown", (event) => {
     if (event.button !== 1) return;
+    if (timelineRecorder.recording) return;
     event.preventDefault();
     event.stopPropagation();
     endItemSoloHold();
@@ -1788,6 +1809,10 @@ function renderItemPickerItems() {
 }
 
 function openItemPicker(category, selectedId, onSelect) {
+  if (timelineRecorder.recording) {
+    setStatus("収録中は音ネタを変更できません", true);
+    return;
+  }
   itemPickerState = { category, selectedId, onSelect, timbre: null, query: "" };
   const categoryName = { B: "BASS", H: "HI-HAT", S: "SAMPLING" }[category];
   $("#itemPickerTitle").textContent = `${categoryName} 音ネタを選択`;
@@ -1822,10 +1847,11 @@ function buildSetButtons() {
 }
 
 function toggleSlotEnabled(index) {
-  if (replaySession?.running) return;
+  if (replayLocked()) return;
   const slot = sets[activeSet].slots[index];
   if (!slot) return;
   slot.enabled = !slot.enabled;
+  timelineRecorder.lanes(sets[activeSet].slots);
   saveSets();
   renderSlots();
   engine.preserveClockReschedule();
@@ -1854,6 +1880,10 @@ function buildSlots() {
         engine.preserveClockReschedule();
       };
       category.addEventListener("change", () => {
+        if (timelineRecorder.recording) {
+          category.value = sets[activeSet].slots[index].category;
+          return;
+        }
         const slot = sets[activeSet].slots[index];
         slot.category = category.value;
         chooseItem(slot.item);
@@ -1892,6 +1922,7 @@ function buildSlots() {
         sequenceToggle.addEventListener("click", () => {
           const slot = sets[activeSet].slots[index];
           slot.itemEnabled[pairIndex] = !slot.itemEnabled[pairIndex];
+          timelineRecorder.lanes(sets[activeSet].slots);
           saveSets();
           renderSlots();
           engine.preserveClockReschedule();
@@ -1915,7 +1946,7 @@ function buildSlots() {
 }
 
 function renderSlots() {
-  if (!replaySession) sets[activeSet] = normalizeSet(sets[activeSet]);
+  if (!timelinePlayer.running) sets[activeSet] = normalizeSet(sets[activeSet]);
   performanceSet().slots.forEach((slot, index) => {
     const card = slotElements[index];
     const toggle = $(".slot-toggle", card);
@@ -1947,7 +1978,11 @@ function getActiveTracks() {
   if (heldSoloItemIds) {
     return heldSoloItemIds.map((itemId) => ({ enabled: true, itemId, meter: heldSoloMeter }));
   }
-  const set = audioPerformanceSet();
+  const timelineTracks = timelinePlayer.audioTracks(
+    (laneIndex) => $(".slot-meter i", slotElements[LANE_SLOT_INDEX[laneIndex]]),
+  );
+  if (timelineTracks) return timelineTracks;
+  const set = sets[activeSet];
   const tracks = [];
   set.slots.forEach((slot, index) => {
     const meter = $(".slot-meter i", slotElements[index]);
@@ -2028,7 +2063,7 @@ function renderSequence(tick) {
   const interruptKey = engine.tech.interrupt
     ? `${engine.techVariant.interrupt}@${Math.round(engine.interruptStartTick ?? -1)}`
     : "off";
-  const sequenceKey = `${activeSet}:replay=${replaySession?.revision ?? "off"}:${globalBar}:int=${interruptKey}:${tracks.map((track) => `${track.lane},${track.itemId},${track.enabled}`).join("|")}`;
+  const sequenceKey = `${activeSet}:replay=${timelinePlayer.running ? "tl" : "off"}:${globalBar}:int=${interruptKey}:${tracks.map((track) => `${track.lane},${track.itemId},${track.enabled}`).join("|")}`;
 
   if (sequenceKey !== renderedSequenceKey) {
     const lanes = tracks.map((track) => {
@@ -2076,9 +2111,10 @@ function renderSequence(tick) {
 }
 
 function switchSet(index) {
-  if (replaySession?.running) return;
+  if (replayLocked()) return;
   if (index === activeSet) return;
   activeSet = index;
+  timelineRecorder.chunk(index, sets[index].slots);
   $$(".set-button").forEach((button, buttonIndex) => button.classList.toggle("active", buttonIndex === index));
   renderSlots();
   saveSets();
@@ -2086,7 +2122,7 @@ function switchSet(index) {
 }
 
 function beginTemporarySetSwitch(index, button) {
-  if (heldSetOrigin != null) return;
+  if (heldSetOrigin != null || timelineRecorder.recording) return;
   endItemSoloHold();
   heldSetOrigin = activeSet;
   heldSetButton = button;
@@ -2106,7 +2142,7 @@ function endTemporarySetSwitch() {
 }
 
 function resetSets() {
-  if (replaySession?.running) return;
+  if (replayLocked() || timelineRecorder.recording) return;
   const confirmed = window.confirm("ア～クの8セットを初期設定に戻します。現在の登録内容は上書きされます。よろしいですか？");
   if (!confirmed) return;
   sets = makeDefaultSets();
@@ -2117,7 +2153,7 @@ function resetSets() {
 }
 
 function randomizeActiveSet() {
-  if (replaySession?.running) return;
+  if (replayLocked() || timelineRecorder.recording) return;
   const set = sets[activeSet];
   for (const slot of set.slots) {
     if (slot.type === "single") {
@@ -2154,600 +2190,36 @@ function setStatus(text, playing = engine.playing) {
   $("#statusLamp").classList.toggle("playing", playing);
 }
 
-function formatReplayTime(seconds) {
-  const whole = Math.max(0, Math.floor(seconds));
-  return `${String(Math.floor(whole / 60)).padStart(2, "0")}:${String(whole % 60).padStart(2, "0")}`;
-}
-
-function buildReplayPadDisplay() {
-  const container = $("#replayPadState");
-  for (const { bit, label } of REPLAY_PAD_DISPLAY) {
-    const key = document.createElement("span");
-    key.className = "replay-pad-key";
-    key.dataset.padBit = String(bit);
-    key.textContent = label;
-    key.setAttribute("aria-hidden", "true");
-    container.append(key);
-  }
-}
-
-function renderReplayPadState(mask = 0) {
-  const activeLabels = [];
-  $$(".replay-pad-key").forEach((key) => {
-    const active = Boolean(mask & Number(key.dataset.padBit));
-    key.classList.toggle("active", active);
-    if (active) activeLabels.push(key.textContent);
-  });
-  $("#replayPadState").setAttribute(
-    "aria-label",
-    activeLabels.length > 0
-      ? `現在押されているリプレイボタン: ${activeLabels.join("、")}`
-      : "現在押されているリプレイボタンはありません",
-  );
-}
-
 function setReplayUiLocked(locked) {
   document.body.classList.toggle("replay-running", locked);
   $$(".set-section button, .set-section select, .slots-section button, .slots-section select, .tech-section button")
     .forEach((control) => { control.disabled = locked; });
   $$(".replay-choice").forEach((button) => { button.disabled = locked; });
-  $("#replayStartButton").disabled = locked;
-  $("#replayStopButton").disabled = !locked;
-  $("#replayStartButton").textContent = locked ? "REPLAY中" : "▶ REPLAY";
 }
 
 function renderReplayIndicators() {
-  const session = replaySession;
+  if (timelinePlayer.running) {
+    const setIndex = timelinePlayer.displaySetIndex();
+    const active = timelinePlayer.activeTech();
+    $$(".set-button").forEach((button, index) => {
+      button.classList.toggle("active", index === setIndex);
+      button.classList.remove("replay-target");
+    });
+    for (const tech of REPLAY_TECHS) {
+      const control = tech.selector ? $(tech.selector) : null;
+      control?.classList.toggle("replay-selected", tech.name === active?.name);
+      control?.classList.toggle("replay-active", tech.name === active?.name);
+    }
+    return;
+  }
   $$(".set-button").forEach((button, index) => {
-    button.classList.toggle("active", index === (session?.currentSet ?? activeSet));
-    button.classList.toggle("replay-target", Boolean(session && index === session.targetSet));
+    button.classList.toggle("active", index === activeSet);
+    button.classList.remove("replay-target");
   });
   for (const tech of REPLAY_TECHS) {
     const control = tech.selector ? $(tech.selector) : null;
-    control?.classList.toggle("replay-selected", Boolean(session && tech === REPLAY_TECHS[session.selectedTech]));
-    control?.classList.toggle("replay-active", Boolean(session?.techHeld && tech === REPLAY_TECHS[session.selectedTech]));
+    control?.classList.remove("replay-selected", "replay-active");
   }
-  if (!session) {
-    $("#replayOperation").textContent = "リプレイを選択してください";
-    return;
-  }
-  const tech = REPLAY_TECHS[session.selectedTech];
-  $("#replayOperation").textContent = `PLAY ${SET_NAMES[session.currentSet]} · CHANGE ${SET_NAMES[session.targetSet]} · TECH ${tech.label}`;
-}
-
-function updateReplayProgress(frame = 0) {
-  const session = replaySession;
-  if (!session) return;
-  const currentSeconds = Math.min(frame, session.replay.frameCount) / REPLAY_FPS;
-  $("#replayProgress").max = session.replay.frameCount;
-  $("#replayProgress").value = Math.min(frame, session.replay.frameCount);
-  $("#replayTime").textContent = `${formatReplayTime(currentSeconds)} / ${formatReplayTime(session.replay.durationSeconds)}`;
-}
-
-function selectReplayTech(index) {
-  const session = replaySession;
-  if (!session) return;
-  const next = (index + REPLAY_TECHS.length) % REPLAY_TECHS.length;
-  if (next === session.selectedTech) return;
-  if (session.techHeld) setReplayTechHeld(false);
-  session.selectedTech = next;
-  renderReplayIndicators();
-}
-
-function selectReplayAudioTech(index) {
-  const session = replaySession;
-  if (!session) return;
-  session.audioSelectedTech = (
-    index + REPLAY_TECHS.length
-  ) % REPLAY_TECHS.length;
-}
-
-function createReplayDirectionCounters() {
-  return Object.fromEntries(
-    REPLAY_DIRECTION_CALLBACKS.map(({ bit }) => [bit, 0]),
-  );
-}
-
-function advanceReplayDirectionCounters(mask, counters) {
-  const callbacks = [];
-  for (const direction of REPLAY_DIRECTION_CALLBACKS) {
-    const heldFrames = counters[direction.bit];
-    if (mask & direction.bit) {
-      if (heldFrames % REPLAY_DIRECTION_REPEAT_FRAMES === 0) {
-        callbacks.push(direction);
-      }
-      counters[direction.bit] = heldFrames + 1;
-    } else {
-      counters[direction.bit] = 0;
-    }
-  }
-  return callbacks;
-}
-
-function queueReplaySelection(kind, delta) {
-  const session = replaySession;
-  if (!session) return;
-  session.selectionQueues[kind].push(delta);
-  document.body.classList.add(`replay-${kind}-pending`);
-  if (session.selectionTimers[kind] !== null) return;
-
-  const applyNext = () => {
-    if (replaySession !== session) return;
-    const nextDelta = session.selectionQueues[kind].shift();
-    if (kind === "change") {
-      const targetSlot = session.chunkSelector ^ 1;
-      session.chunkSlots[targetSlot] = (session.chunkSlots[targetSlot] + nextDelta + 8) % 8;
-      session.targetSet = session.chunkSlots[targetSlot];
-      renderReplayIndicators();
-    } else {
-      selectReplayTech(session.selectedTech + nextDelta);
-    }
-    if (session.selectionQueues[kind].length > 0) {
-      session.selectionTimers[kind] = window.setTimeout(applyNext, REPLAY_SELECTION_LAG_MS);
-    } else {
-      session.selectionTimers[kind] = null;
-      document.body.classList.remove(`replay-${kind}-pending`);
-    }
-  };
-
-  session.selectionTimers[kind] = window.setTimeout(applyNext, REPLAY_SELECTION_LAG_MS);
-}
-
-function configureReplayTechVariant(
-  name,
-  variant,
-  effectiveTime = null,
-  replayEndTime = null,
-) {
-  const setting = replaySession?.replay.techSettings?.[name] ?? 0;
-  if (name === "delay" || name === "mod" || name === "bpm" || name === "reverb" || name === "interrupt") {
-    engine.setTechVariant(name, variant, effectiveTime);
-  } else if (name === "stb") {
-    engine.setStbPattern(setting, variant, effectiveTime);
-  } else if (name === "fill") {
-    engine.setFillPattern(setting, variant, effectiveTime, replayEndTime);
-  } else if (name === "arp") {
-    engine.setArpPattern(setting, variant, effectiveTime);
-  } else if (name === "flsh") {
-    engine.setFlshPattern(setting, variant, effectiveTime);
-  } else if (name === "mrg") {
-    engine.setMrgPattern(setting, variant, effectiveTime);
-  }
-}
-
-function setReplayTechHeld(held, variant = null) {
-  const session = replaySession;
-  if (!session) return;
-  const techName = REPLAY_TECHS[session.selectedTech].name;
-  if (!held) {
-    if (!session.techHeld) return;
-    session.techHeld = false;
-    session.activeTechName = null;
-    session.techVariant = null;
-    renderReplayIndicators();
-    return;
-  }
-
-  const nextVariant = Math.max(0, Math.min(3, Number(variant)));
-  if (
-    session.techHeld
-    && session.activeTechName === techName
-    && session.techVariant === nextVariant
-  ) return;
-  session.techHeld = true;
-  session.activeTechName = techName;
-  session.techVariant = nextVariant;
-  renderReplayIndicators();
-}
-
-function queueReplayTechEngineOperation(name, inputTime, operation, leadSeconds = 0) {
-  const session = replaySession;
-  if (!session) return;
-  if (name !== "bpm" && name !== "fill") {
-    operation(inputTime);
-    return;
-  }
-  const wait = Math.max(
-    0,
-    (inputTime - engine.context.currentTime - leadSeconds) * 1000,
-  );
-  const timer = window.setTimeout(() => {
-    session.techOperationTimers.delete(timer);
-    if (replaySession === session && session.running) {
-      operation(name === "fill" ? inputTime : null);
-    }
-  }, wait);
-  session.techOperationTimers.add(timer);
-}
-
-function setReplayAudioTechHeld(
-  held,
-  variant = null,
-  inputTime,
-  replayEndTime = null,
-) {
-  const session = replaySession;
-  if (!session) return;
-  const techName = REPLAY_TECHS[session.audioSelectedTech].name;
-  if (!held) {
-    if (!session.audioTechHeld) return;
-    const previousName = session.audioActiveTechName;
-    if (previousName) {
-      queueReplayTechEngineOperation(
-        previousName,
-        inputTime,
-        (effectiveTime) => engine.setTech(previousName, false, effectiveTime),
-      );
-    }
-    session.audioTechHeld = false;
-    session.audioActiveTechName = null;
-    session.audioTechVariant = null;
-    return;
-  }
-
-  const nextVariant = Math.max(0, Math.min(3, Number(variant)));
-  if (
-    session.audioTechHeld
-    && session.audioActiveTechName === techName
-    && session.audioTechVariant === nextVariant
-  ) return;
-  const previousName = session.audioActiveTechName;
-  const wasHeld = session.audioTechHeld && previousName === techName;
-  if (session.audioTechHeld && previousName !== techName && previousName) {
-    queueReplayTechEngineOperation(
-      previousName,
-      inputTime,
-      (effectiveTime) => engine.setTech(previousName, false, effectiveTime),
-    );
-  }
-  session.audioTechHeld = true;
-  session.audioActiveTechName = techName;
-  session.audioTechVariant = nextVariant;
-  if (techName) {
-    // Run the fill press slightly early so the quantized boundary can be
-    // scheduled on its exact audio timestamp; the release keeps zero lead so
-    // a boundary inside the final frames is not cancelled prematurely.
-    queueReplayTechEngineOperation(techName, inputTime, (effectiveTime) => {
-      configureReplayTechVariant(
-        techName,
-        nextVariant,
-        effectiveTime,
-        replayEndTime,
-      );
-      if (!wasHeld) {
-        engine.setTech(
-          techName,
-          true,
-          effectiveTime,
-          techName === "fill"
-            ? { replay: true, endTime: replayEndTime }
-            : null,
-        );
-      }
-    }, techName === "fill" ? REPLAY_FILL_TIMER_LEAD_SECONDS : 0);
-  }
-}
-
-function findReplayTechHoldEndTime(startFrame) {
-  const session = replaySession;
-  if (!session) return Number.POSITIVE_INFINITY;
-  for (let frame = startFrame + 1; frame < session.replay.frameCount; frame += 1) {
-    const mask = session.replay.frames[frame];
-    const hasDirection = REPLAY_TECH_DIRECTIONS.some(({ bit }) => mask & bit);
-    if ((mask & PAD.SQUARE) || !hasDirection) {
-      return session.startTime + frame / REPLAY_FPS;
-    }
-  }
-  return session.startTime + session.replay.frameCount / REPLAY_FPS;
-}
-
-function updateReplayAudioTechDirections(mask, previousMask, inputTime, frame) {
-  const session = replaySession;
-  if (!session) return;
-  const squareHeld = Boolean(mask & PAD.SQUARE);
-  const activeDirections = squareHeld
-    ? []
-    : REPLAY_TECH_DIRECTIONS.filter(({ bit }) => mask & bit);
-  if (activeDirections.length === 0) {
-    setReplayAudioTechHeld(false, null, inputTime);
-    return;
-  }
-  const newlyPressed = activeDirections.filter(({ bit }) => !(previousMask & bit));
-  if (newlyPressed.length > 0) {
-    setReplayAudioTechHeld(
-      true,
-      newlyPressed.at(-1).variant,
-      inputTime,
-      findReplayTechHoldEndTime(frame),
-    );
-  }
-}
-
-function updateReplayTechDirections(mask, previousMask) {
-  const session = replaySession;
-  if (!session) return;
-  const squareHeld = Boolean(mask & PAD.SQUARE);
-  const activeDirections = squareHeld
-    ? []
-    : REPLAY_TECH_DIRECTIONS.filter(({ bit }) => mask & bit);
-  session.techDirectionStack = activeDirections.map(({ bit }) => bit);
-  if (activeDirections.length === 0) {
-    setReplayTechHeld(false);
-    return;
-  }
-
-  // SDED.OX changes the TECH parameter only on a direction's press callback.
-  // Releasing the most recently pressed direction while another is still held
-  // does not reactivate that older direction's parameter.
-  const newlyPressed = activeDirections.filter(({ bit }) => !(previousMask & bit));
-  if (newlyPressed.length > 0) {
-    setReplayTechHeld(true, newlyPressed.at(-1).variant);
-  }
-}
-
-function activateReplayAudioChunk(inputTime) {
-  const session = replaySession;
-  if (!session) return;
-  session.audioCurrentSet = session.audioChunkSlots[session.audioChunkSelector];
-  session.audioTargetSet = session.audioChunkSlots[session.audioChunkSelector ^ 1];
-  session.audioLiveSet = session.audioSetStates[session.audioCurrentSet];
-  // SDED.OX restores the new song at the old song's current sequence
-  // position (FUN_800afac4 reseeks to the live bar/tick pair).
-  engine.preserveClockRescheduleAt(inputTime);
-}
-
-function replayChunkSwapTime(inputTime) {
-  // SDED.OX keeps the CROSS change as a pending request (DAT_800cbb5c) that
-  // FUN_800aff24 executes on integer ticks 0..6 of a 24-tick period — the
-  // same window as the cue request.  It is not an immediate switch.
-  const inputTick = Math.max(0, engine.tickAtTime(inputTime));
-  const requestTick = Math.ceil(inputTick - 1e-9);
-  const phase = requestTick % CUE_QUANTIZE_TICKS;
-  const targetTick = phase < CUE_IMMEDIATE_WINDOW_TICKS
-    ? requestTick
-    : requestTick + CUE_QUANTIZE_TICKS - phase;
-  return engine.timeAtTick(targetTick);
-}
-
-function queueReplayAudioChunkSwap(inputTime) {
-  const session = replaySession;
-  // A single pending slot: pressing CROSS again before the window executes
-  // the request does not queue a second switch.
-  if (!session || session.audioChunkSwapTimer !== null) return;
-  const swapTime = replayChunkSwapTime(inputTime);
-  const wait = Math.max(
-    0,
-    (swapTime - engine.context.currentTime - REPLAY_INPUT_LOOKAHEAD_SECONDS) * 1000,
-  );
-  session.audioChunkSwapTimer = window.setTimeout(() => {
-    if (replaySession !== session || !session.running) return;
-    session.audioChunkSwapTimer = null;
-    if (session.audioCurrentSet === session.audioTargetSet) return;
-    session.audioChunkSelector ^= 1;
-    activateReplayAudioChunk(swapTime);
-  }, wait);
-}
-
-function queueReplayDisplayChunkSwap() {
-  const session = replaySession;
-  if (!session || session.displayChunkSwapTimer !== null) return;
-  const now = engine.context.currentTime;
-  const swapTime = replayChunkSwapTime(now);
-  session.displayChunkSwapTimer = window.setTimeout(() => {
-    if (replaySession !== session || !session.running) return;
-    session.displayChunkSwapTimer = null;
-    if (session.currentSet === session.targetSet) return;
-    session.chunkSelector ^= 1;
-    activateReplayDisplayChunk();
-  }, Math.max(0, (swapTime - now) * 1000));
-}
-
-function activateReplayDisplayChunk() {
-  const session = replaySession;
-  if (!session) return;
-  session.currentSet = session.chunkSlots[session.chunkSelector];
-  session.targetSet = session.chunkSlots[session.chunkSelector ^ 1];
-  session.liveSet = session.setStates[session.currentSet];
-  session.revision += 1;
-  renderedSequenceKey = "";
-  renderSlots();
-  renderReplayIndicators();
-}
-
-function scheduleReplayAudioPad(mask, previousMask, inputTime, frame) {
-  const session = replaySession;
-  if (!session) return;
-  const rising = (bit) => Boolean((mask & bit) && !(previousMask & bit));
-  const directionCallbacks = advanceReplayDirectionCounters(
-    mask,
-    session.audioDirectionCounters,
-  );
-  let audioChanged = false;
-  REPLAY_SHOULDER_BITS.forEach((bit, index) => {
-    if (!rising(bit)) return;
-    const slot = session.audioLiveSet.slots[index];
-    if (slot.type === "single") {
-      slot.enabled = !slot.enabled;
-    } else {
-      slot.itemEnabled = slot.itemEnabled.map((enabled) => !enabled);
-      slot.enabled = slot.itemEnabled.some(Boolean);
-    }
-    audioChanged = true;
-  });
-
-  if (mask & PAD.SQUARE) {
-    for (const { selection, delta } of directionCallbacks) {
-      if (selection === "change") {
-        const targetSlot = session.audioChunkSelector ^ 1;
-        session.audioChunkSlots[targetSlot] = (
-          session.audioChunkSlots[targetSlot] + delta + 8
-        ) % 8;
-        session.audioTargetSet = session.audioChunkSlots[targetSlot];
-      } else {
-        selectReplayAudioTech(session.audioSelectedTech + delta);
-      }
-    }
-  }
-
-  if (rising(PAD.CROSS)) queueReplayAudioChunkSwap(inputTime);
-  if (rising(PAD.CIRCLE)) engine.cue(inputTime);
-  updateReplayAudioTechDirections(mask, previousMask, inputTime, frame);
-
-  if (audioChanged) {
-    engine.preserveClockRescheduleAt(inputTime);
-  }
-}
-
-function applyReplayPad(mask, previousMask) {
-  const session = replaySession;
-  if (!session) return;
-  renderReplayPadState(mask);
-  const rising = (bit) => Boolean((mask & bit) && !(previousMask & bit));
-  const directionCallbacks = advanceReplayDirectionCounters(
-    mask,
-    session.directionCounters,
-  );
-  let shoulderChanged = false;
-  REPLAY_SHOULDER_BITS.forEach((bit, index) => {
-    if (!rising(bit)) return;
-    const slot = session.liveSet.slots[index];
-    if (slot.type === "single") {
-      slot.enabled = !slot.enabled;
-    } else {
-      slot.itemEnabled = slot.itemEnabled.map((enabled) => !enabled);
-      slot.enabled = slot.itemEnabled.some(Boolean);
-    }
-    shoulderChanged = true;
-  });
-
-  if (mask & PAD.SQUARE) {
-    for (const { selection, delta } of directionCallbacks) {
-      queueReplaySelection(selection, delta);
-    }
-  }
-
-  if (rising(PAD.CROSS)) queueReplayDisplayChunkSwap();
-  updateReplayTechDirections(mask, previousMask);
-
-  if (shoulderChanged) {
-    session.revision += 1;
-    renderedSequenceKey = "";
-    renderSlots();
-  }
-}
-
-function finishReplay(message = "リプレイを停止しました") {
-  const session = replaySession;
-  if (!session) return;
-  cancelAnimationFrame(session.animationFrame);
-  if (session.inputTimer !== null) window.clearTimeout(session.inputTimer);
-  if (session.audioInputTimer !== null) window.clearTimeout(session.audioInputTimer);
-  if (session.audioChunkSwapTimer !== null) window.clearTimeout(session.audioChunkSwapTimer);
-  if (session.displayChunkSwapTimer !== null) window.clearTimeout(session.displayChunkSwapTimer);
-  for (const timer of session.techOperationTimers) window.clearTimeout(timer);
-  session.techOperationTimers.clear();
-  for (const timer of Object.values(session.selectionTimers)) {
-    if (timer !== null) window.clearTimeout(timer);
-  }
-  document.body.classList.remove("replay-change-pending", "replay-tech-pending");
-  setReplayTechHeld(false);
-  if (session.audioActiveTechName) {
-    engine.setTech(session.audioActiveTechName, false);
-  }
-  replaySession = null;
-  renderReplayPadState(0);
-  setReplayUiLocked(false);
-  if (engine.playing) engine.stop();
-  $("#playButton").textContent = "▶ PLAY";
-  $("#playButton").classList.remove("stop");
-  renderedSequenceKey = "";
-  renderSlots();
-  renderReplayIndicators();
-  updatePosition(engine.pausedTick);
-  setStatus(message, false);
-}
-
-function scheduleReplayAudioThrough(targetFrame) {
-  const session = replaySession;
-  if (!session?.running) return;
-  const lastFrame = Math.min(session.replay.frameCount - 1, targetFrame);
-  while (session.scheduledFrame <= lastFrame) {
-    const inputTime = session.startTime + session.scheduledFrame / REPLAY_FPS;
-    const mask = session.replay.frames[session.scheduledFrame];
-    scheduleReplayAudioPad(
-      mask,
-      session.audioPreviousMask,
-      inputTime,
-      session.scheduledFrame,
-    );
-    session.audioPreviousMask = mask;
-    session.scheduledFrame += 1;
-  }
-}
-
-function processReplayAudioInput() {
-  const session = replaySession;
-  if (!session?.running) return;
-  const scheduleTime = engine.context.currentTime + REPLAY_INPUT_LOOKAHEAD_SECONDS;
-  const elapsed = scheduleTime - session.startTime;
-  if (elapsed >= 0) {
-    scheduleReplayAudioThrough(Math.floor(elapsed * REPLAY_FPS));
-  }
-  if (session.scheduledFrame >= session.replay.frameCount) {
-    session.audioInputTimer = null;
-    return;
-  }
-  const nextInputTime = session.startTime + session.scheduledFrame / REPLAY_FPS;
-  const nextWakeTime = nextInputTime - REPLAY_INPUT_LOOKAHEAD_SECONDS;
-  session.audioInputTimer = window.setTimeout(
-    processReplayAudioInput,
-    Math.max(1, (nextWakeTime - engine.context.currentTime) * 1000),
-  );
-}
-
-function processReplayInput() {
-  const session = replaySession;
-  if (!session?.running) return;
-  const now = engine.context.currentTime;
-  if (now < session.startTime) {
-    session.inputTimer = window.setTimeout(
-      processReplayInput,
-      Math.max(1, (session.startTime - now) * 1000),
-    );
-    return;
-  }
-  const elapsed = now - session.startTime;
-  const targetFrame = Math.min(session.replay.frameCount - 1, Math.floor(elapsed * REPLAY_FPS));
-  // If the browser delayed the look-ahead timer, preserve event ordering and
-  // apply the audio transition before its corresponding visual/input update.
-  scheduleReplayAudioThrough(targetFrame);
-  while (session.processedFrame <= targetFrame) {
-    const mask = session.replay.frames[session.processedFrame];
-    applyReplayPad(mask, session.previousMask);
-    session.previousMask = mask;
-    session.processedFrame += 1;
-  }
-  if (session.processedFrame >= session.replay.frameCount) {
-    session.inputTimer = null;
-    return;
-  }
-  const nextInputTime = session.startTime + session.processedFrame / REPLAY_FPS;
-  session.inputTimer = window.setTimeout(
-    processReplayInput,
-    Math.max(1, (nextInputTime - engine.context.currentTime) * 1000),
-  );
-}
-
-function drawReplay() {
-  const session = replaySession;
-  if (!session?.running) return;
-  const elapsed = Math.max(0, engine.context.currentTime - session.startTime);
-  updateReplayProgress(session.processedFrame);
-  if (elapsed * REPLAY_FPS >= session.replay.frameCount) {
-    finishReplay(`${session.replay.id} リプレイ終了`);
-    return;
-  }
-  session.animationFrame = requestAnimationFrame(drawReplay);
 }
 
 async function loadReplayDefinition(definition) {
@@ -2756,122 +2228,76 @@ async function loadReplayDefinition(definition) {
   return parseReplay(await response.arrayBuffer(), data, definition.id);
 }
 
-async function startReplay() {
-  if (replaySession?.running) return;
-  const definition = REPLAY_DEFINITIONS.find((candidate) => candidate.id === selectedReplayId);
-  const startButton = $("#replayStartButton");
-  startButton.disabled = true;
-  try {
-    setStatus(`${definition.id} リプレイを読込中`, false);
-    const replay = await loadReplayDefinition(definition);
-    if (engine.playing) engine.stop();
-    await engine.initialize((message) => setStatus(message, false));
-    for (const techName of ENGINE_TECH_NAMES) engine.setTech(techName, false);
-    engine.pausedTick = 0;
-    engine.setBpm(replay.bpm);
-    $("#bpmInput").value = String(replay.bpm);
-    $("#bpmOutput").textContent = String(replay.bpm);
-    const setStates = replay.sets.map(cloneReplaySet);
-    const audioSetStates = replay.sets.map(cloneReplaySet);
-    replaySession = {
-      running: true,
-      replay,
-      setStates,
-      audioSetStates,
-      liveSet: setStates[replay.activeSet],
-      audioLiveSet: audioSetStates[replay.activeSet],
-      chunkSelector: replay.chunkSelector,
-      audioChunkSelector: replay.chunkSelector,
-      chunkSlots: [...replay.chunkSlots],
-      audioChunkSlots: [...replay.chunkSlots],
-      currentSet: replay.activeSet,
-      targetSet: replay.targetSet,
-      audioCurrentSet: replay.activeSet,
-      audioTargetSet: replay.targetSet,
-      selectedTech: replay.selectedTech,
-      audioSelectedTech: replay.selectedTech,
-      techHeld: false,
-      activeTechName: null,
-      techVariant: null,
-      techDirectionStack: [],
-      audioTechHeld: false,
-      audioActiveTechName: null,
-      audioTechVariant: null,
-      techOperationTimers: new Set(),
-      processedFrame: 0,
-      previousMask: 0,
-      revision: 0,
-      animationFrame: 0,
-      inputTimer: null,
-      audioInputTimer: null,
-      audioChunkSwapTimer: null,
-      displayChunkSwapTimer: null,
-      scheduledFrame: 0,
-      audioPreviousMask: 0,
-      directionCounters: createReplayDirectionCounters(),
-      audioDirectionCounters: createReplayDirectionCounters(),
-      startTime: 0,
-      selectionQueues: { change: [], tech: [] },
-      selectionTimers: { change: null, tech: null },
-    };
-    setReplayUiLocked(true);
-    renderReplayIndicators();
-    renderSlots();
-    updateReplayProgress(0);
-    await engine.start();
-    replaySession.startTime = engine.originTime;
-    $("#playButton").textContent = "■ STOP";
-    $("#playButton").classList.add("stop");
-    $("#replayTitle").textContent = replay.title;
-    setStatus(`${replay.id} リプレイ再生中`, true);
-    processReplayAudioInput();
-    processReplayInput();
-    replaySession.animationFrame = requestAnimationFrame(drawReplay);
-  } catch (error) {
-    console.error(error);
-    if (replaySession) finishReplay("リプレイを停止しました");
-    setStatus(`リプレイエラー: ${error.message}`, false);
-  } finally {
-    if (!replaySession?.running) startButton.disabled = false;
+const bundledTimelines = new Map();
+const convertedTimelines = new Map();
+
+// Playback uses the bundled, hand-adjusted gj6-timeline files.
+async function loadReplayTimeline(definition) {
+  if (!bundledTimelines.has(definition.id)) {
+    const response = await fetch(definition.timelinePath);
+    if (!response.ok) throw new Error(`${definition.timelinePath}: HTTP ${response.status}`);
+    const timeline = await response.json();
+    const { ok, errors } = validateTimeline(timeline, itemMap);
+    if (!ok) throw new Error(errors[0]);
+    bundledTimelines.set(definition.id, {
+      replayTitle: timeline.meta.title ?? definition.id,
+      timeline,
+    });
   }
+  return bundledTimelines.get(definition.id);
 }
 
-function buildReplayButtons() {
-  const container = $("#replayChoices");
-  for (const definition of REPLAY_DEFINITIONS) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = `replay-choice${definition.id === selectedReplayId ? " active" : ""}`;
-    button.textContent = definition.id;
-    button.addEventListener("click", () => {
-      selectedReplayId = definition.id;
-      $$(".replay-choice").forEach((candidate) => candidate.classList.toggle("active", candidate === button));
-      $("#replayTitle").textContent = `${definition.id}.DENR`;
+// The original DENR pad stream stays available as a conversion source
+// (also used for user save files imported through the editor).
+async function loadConvertedReplayTimeline(definition) {
+  if (!convertedTimelines.has(definition.id)) {
+    const replay = await loadReplayDefinition(definition);
+    convertedTimelines.set(definition.id, {
+      replayTitle: replay.title,
+      timeline: convertReplayToTimeline(replay),
     });
-    container.append(button);
   }
+  return convertedTimelines.get(definition.id);
 }
 
 async function togglePlay() {
-  if (replaySession?.running) {
-    finishReplay("リプレイを停止しました");
+  if (timelinePlayer.running) {
+    timelinePlayer.stop("リプレイを停止しました");
     return;
   }
   const button = $("#playButton");
   if (engine.playing) {
+    const wasRecording = timelineRecorder.recording;
+    finishRecordingIfActive();
     engine.stop();
     button.textContent = "▶ PLAY";
     button.classList.remove("stop");
-    setStatus("停止中", false);
+    setStatus(wasRecording ? "収録を終了し、エディタに展開しました" : "停止中", false);
     return;
   }
   button.disabled = true;
   try {
     await engine.initialize((message) => setStatus(message, false));
+    if (timelineRecorder.armed) engine.pausedTick = 0;
     await engine.start();
+    if (timelineRecorder.armed) {
+      timelineRecorder.begin({
+        sets,
+        activeSet,
+        bpm: engine.bpm,
+        techSettings: {
+          stb: engine.stbSetting,
+          flsh: engine.flshSetting,
+          mrg: engine.mrgSetting,
+          fill: engine.fillSetting,
+          arp: engine.arpSetting,
+        },
+      });
+      setStatus("収録中…", true);
+    }
     button.textContent = "■ STOP";
     button.classList.add("stop");
-    setStatus("演奏中", true);
+    if (!timelineRecorder.recording) setStatus("演奏中", true);
   } catch (error) {
     console.error(error);
     setStatus(`読込エラー: ${error.message}`, false);
@@ -2880,8 +2306,39 @@ async function togglePlay() {
   }
 }
 
-buildReplayPadDisplay();
-buildReplayButtons();
+const timelineEditor = createTimelineEditor({
+  player: timelinePlayer,
+  recorder: timelineRecorder,
+  itemMap,
+  setStatus,
+  presetIds: REPLAY_DEFINITIONS.map((definition) => definition.id),
+  getPresetTimeline: async (id) => {
+    const definition = REPLAY_DEFINITIONS.find((candidate) => candidate.id === id);
+    const { timeline } = await loadReplayTimeline(definition);
+    return timeline;
+  },
+  getOriginalDenrTimeline: async (id) => {
+    const definition = REPLAY_DEFINITIONS.find((candidate) => candidate.id === id);
+    const { timeline } = await loadConvertedReplayTimeline(definition);
+    return timeline;
+  },
+  convertDenrBuffer: (arrayBuffer, name) => (
+    convertReplayToTimeline(parseReplay(arrayBuffer, data, name))
+  ),
+  onLoaded: (timeline) => {
+    // Overwrite the 8-set chunk bank with the loaded timeline's sets so the
+    // slot UI / manual performance match the loaded data.
+    sets = timeline.sets.map((definition) => (
+      timelineSetToSlots(definition, [true, true, true, true, true, true])
+    ));
+    saveSets();
+    renderSlots();
+    renderReplayIndicators();
+    if (engine.playing && !timelinePlayer.running) engine.preserveClockReschedule();
+  },
+});
+onRecordingFinished = (recorded) => timelineEditor.load(recorded);
+
 buildSetButtons();
 buildSlots();
 buildSequenceRuler();
@@ -2893,8 +2350,6 @@ setStatus("停止中", false);
 
 $("#playButton").addEventListener("click", togglePlay);
 $("#cueButton").addEventListener("click", () => engine.cue());
-$("#replayStartButton").addEventListener("click", startReplay);
-$("#replayStopButton").addEventListener("click", () => finishReplay("リプレイを停止しました"));
 $("#resetSetsButton").addEventListener("click", resetSets);
 $("#randomizeSetButton").addEventListener("click", randomizeActiveSet);
 $("#closeItemPicker").addEventListener("click", () => $("#itemPickerDialog").close());
@@ -2923,6 +2378,11 @@ window.addEventListener("blur", () => {
   endTemporarySetSwitch();
 });
 $("#bpmInput").addEventListener("input", (event) => {
+  if (timelineRecorder.recording) {
+    event.target.value = String(engine.bpm);
+    setStatus("収録中はBPMを変更できません", true);
+    return;
+  }
   $("#bpmOutput").textContent = event.target.value;
   engine.setBpm(event.target.value);
 });
@@ -3000,6 +2460,7 @@ $$('.tech-button').forEach((button) => {
     button.addEventListener("click", () => {
       const enabled = !engine.tech[name];
       engine.setTech(name, enabled);
+      timelineRecorder.techHold(name, currentTechSetting(name), engine.techVariant[name], enabled);
       button.classList.toggle("active", enabled);
       button.setAttribute("aria-pressed", String(enabled));
     });
@@ -3011,6 +2472,7 @@ $$('.tech-button').forEach((button) => {
     if (held === enabled) return;
     held = enabled;
     engine.setTech(name, enabled);
+    timelineRecorder.techHold(name, currentTechSetting(name), engine.techVariant[name], enabled);
     button.classList.toggle("active", enabled);
     button.setAttribute("aria-pressed", String(enabled));
     setStatus(enabled ? `TECH ${name.toUpperCase()} 発動中` : (engine.playing ? "演奏中" : "停止中"), enabled || engine.playing);
@@ -3047,6 +2509,15 @@ $$('.tech-button').forEach((button) => {
 
 function bindDirectTechButtons(selector, techName, configure, statusText) {
   let activeButton = null;
+  const datasetPrefix = techName === "interrupt" ? "int" : techName;
+  const recordHold = (button, enabled) => {
+    timelineRecorder.techHold(
+      techName,
+      Number(button.dataset[`${datasetPrefix}Setting`] ?? currentTechSetting(techName)),
+      Number(button.dataset[`${datasetPrefix}Variant`] ?? 0),
+      enabled,
+    );
+  };
   $$(selector).forEach((button) => {
     let held = false;
     const setHeld = (enabled) => {
@@ -3060,6 +2531,7 @@ function bindDirectTechButtons(selector, techName, configure, statusText) {
         activeButton = button;
         configure(button);
         engine.setTech(techName, true);
+        recordHold(button, true);
         updatePosition(engine.context && engine.playing
           ? Math.max(0, engine.tickAtTime(engine.context.currentTime))
           : engine.pausedTick);
@@ -3072,6 +2544,7 @@ function bindDirectTechButtons(selector, techName, configure, statusText) {
         if (activeButton === button) {
           activeButton = null;
           engine.setTech(techName, false);
+          recordHold(button, false);
           updatePosition(engine.context && engine.playing
             ? Math.max(0, engine.tickAtTime(engine.context.currentTime))
             : engine.pausedTick);
