@@ -275,3 +275,34 @@ select { width: 100%; min-width: 0; height: 38px; padding: 0 28px 0 9px; border:
 .editor-field input, .editor-field select { background: var(--panel-hi); color: var(--ink); border: 1px solid var(--line); border-radius: 4px; padding: 3px 5px; width: 84px; }
 .editor-field select { width: auto; }
 .editor-delete { background: #40201d; color: #ff9d8a; border: 1px solid #7a3c33; border-radius: 5px; padding: 4px 10px; cursor: pointer; }
+
+/* ---- ボールペンコウジョウ (求人チラシ + 工場) ---- */
+.job-ad { position: fixed; right: 14px; bottom: 14px; z-index: 40; width: 168px; background: #f5eeda; color: #2a2118; border: 2px solid #c9b88a; border-radius: 4px; transform: rotate(2deg); box-shadow: 0 4px 14px #000a; transition: transform .15s; }
+.job-ad:hover { transform: rotate(0deg) scale(1.04); }
+.job-ad-body { display: block; width: 100%; padding: 10px 12px 9px; background: none; border: none; color: inherit; text-align: left; cursor: pointer; }
+.job-ad-body:hover { transform: none; }
+.job-ad-close { position: absolute; top: -10px; right: -10px; width: 22px; height: 22px; padding: 0; border-radius: 50%; border: 2px solid #c9b88a; background: #f5eeda; color: #8a7b5c; font-size: 12px; font-weight: bold; line-height: 1; cursor: pointer; }
+.job-ad-close:hover { color: #c33; border-color: #c33; transform: none; }
+.job-ad .job-tag { display: inline-block; margin-bottom: 4px; padding: 1px 7px; background: #c33; color: #fff; font-size: 9px; font-weight: bold; letter-spacing: .2em; border-radius: 2px; }
+.job-ad .job-title { display: block; font-weight: bold; font-size: 12px; letter-spacing: .04em; }
+.job-ad .job-desc { display: block; margin: 3px 0 5px; color: #6b5d43; font-size: 9px; line-height: 1.5; }
+.job-ad .job-money { display: block; padding-top: 4px; border-top: 1px dashed #c9b88a; color: #1a6b2a; font-size: 10px; font-weight: bold; font-variant-numeric: tabular-nums; }
+.pen-factory-dialog { width: min(680px, calc(100% - 32px)); padding: 0; border: 1px solid var(--line); background: var(--panel); color: var(--ink); }
+.pen-factory-dialog::backdrop { background: #050504d9; backdrop-filter: blur(3px); }
+.factory-shell { padding: 16px; }
+.factory-head { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
+.factory-head h3 { flex: 1; margin: 0; color: var(--acid); font-size: 16px; letter-spacing: .12em; }
+.factory-money { color: #39ff14; font-family: ui-monospace, monospace; font-size: 17px; font-weight: bold; font-variant-numeric: tabular-nums; }
+.factory-close { width: 36px; height: 36px; color: var(--muted); background: transparent; border: 1px solid var(--line); font-size: 17px; }
+.factory-close:hover { color: var(--ink); border-color: var(--muted); }
+#factoryCanvas { display: block; width: 100%; border: 1px solid var(--line); background: #171028; }
+.factory-controls { display: flex; gap: 12px; margin: 14px 0 10px; }
+.factory-btn { flex: 1; padding: 14px 8px; color: var(--cyan); background: transparent; border: 2px solid var(--cyan); font-size: 14px; font-weight: bold; letter-spacing: .08em; user-select: none; -webkit-user-select: none; }
+.factory-btn:hover { background: #65e5df1a; }
+.factory-btn:active, .factory-btn.pressed { color: #03222b; background: var(--cyan); box-shadow: 0 0 14px #65e5dfb3; }
+.factory-btn kbd { margin-left: 6px; padding: 1px 6px; border: 1px solid currentColor; border-radius: 4px; font-family: inherit; font-size: 10px; }
+.factory-hint { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.7; }
+.factory-hint b { color: var(--acid); }
+@media (max-width: 900px) {
+  .job-ad { position: relative; display: block; width: 168px; margin: 0 auto 14px; transform: none; }
+}

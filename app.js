@@ -19,6 +19,7 @@ import { timelineSetToSlots, validateTimeline } from "./timeline.js";
 import { createTimelinePlayer } from "./timeline-player.js";
 import { createTimelineRecorder } from "./timeline-recorder.js";
 import { createTimelineEditor } from "./timeline-editor.js";
+import { initPenFactory } from "./pen-factory.js";
 
 const SLOT_SHORTCUTS = [
   { code: "KeyQ", label: "Q" },
@@ -2339,6 +2340,7 @@ const timelineEditor = createTimelineEditor({
 });
 onRecordingFinished = (recorded) => timelineEditor.load(recorded);
 
+initPenFactory();
 buildSetButtons();
 buildSlots();
 buildSequenceRuler();
@@ -2656,6 +2658,7 @@ bindDirectTechButtons(
 window.addEventListener("keydown", (event) => {
   if (event.defaultPrevented) return;
   if ($("#itemPickerDialog").open) return;
+  if ($("#penFactoryDialog").open) return;
   const activeElement = document.activeElement;
   if (["SELECT", "INPUT", "TEXTAREA"].includes(activeElement?.tagName)) return;
   if (activeElement?.isContentEditable || event.isComposing) return;

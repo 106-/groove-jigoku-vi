@@ -10,6 +10,16 @@
 </head>
 
 <body>
+  <div class="job-ad" id="jobAd">
+    <button class="job-ad-close" id="jobAdClose" type="button" title="求人を剥がす">×</button>
+    <button class="job-ad-body" id="jobBtn" type="button">
+      <span class="job-tag">求人</span>
+      <span class="job-title">ボールペンコウジョウ</span>
+      <span class="job-desc">キャップしめ係・出来高制<br>時給 ¥0</span>
+      <span class="job-money" id="moneyLabel">所持金 ¥0</span>
+    </button>
+  </div>
+
   <main class="app-shell">
     <header class="hero">
       <div>
@@ -451,6 +461,26 @@
         <span>🔊＝同期試聴 / ホイール押し込み＝HOLD SOLO</span>
       </div>
       <div id="itemPickerItems" class="item-picker-items"></div>
+    </div>
+  </dialog>
+
+  <dialog id="penFactoryDialog" class="pen-factory-dialog" aria-label="ボールペンコウジョウ">
+    <div class="factory-shell">
+      <div class="factory-head">
+        <h3>ボールペンコウジョウ</h3>
+        <span class="factory-money" id="factoryMoney">¥0</span>
+        <button class="factory-close" id="factoryClose" type="button" title="閉じる (ESC)">×</button>
+      </div>
+      <canvas id="factoryCanvas" width="640" height="260"></canvas>
+      <div class="factory-controls">
+        <button id="flipBtn" class="factory-btn" type="button">ひっくり返す <kbd>Z</kbd></button>
+        <button id="capBtn" class="factory-btn" type="button">キャップ <kbd>X</kbd></button>
+      </div>
+      <p class="factory-hint">
+        作業エリアに入ったペンに<b>キャップ</b>をかぶせる。
+        ペン先が下向きのペンは先に<b>ひっくり返す</b>こと。
+        失敗してもペナルティなし(出来高制)。DJプレイは工場勤務中も流れ続けます。
+      </p>
     </div>
   </dialog>
 
