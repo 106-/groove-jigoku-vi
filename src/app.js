@@ -1532,7 +1532,7 @@ function loadSets() {
   return makeDefaultSets();
 }
 
-const data = await fetch("data/catalog.json").then((response) => {
+const data = await fetch("assets/catalog.json").then((response) => {
   if (!response.ok) throw new Error(`catalog.json: HTTP ${response.status}`);
   return response.json();
 });

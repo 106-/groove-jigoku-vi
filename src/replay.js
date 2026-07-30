@@ -1,9 +1,9 @@
 // timelinePath is the bundled, hand-adjusted gj6-timeline used for playback;
 // path keeps the original DENR pad stream (conversion source / reference).
 export const REPLAY_DEFINITIONS = [
-  { id: "FMY", path: "data/replays/FMY.DENR", timelinePath: "data/replays/FMY.gj6.json" },
-  { id: "PIG", path: "data/replays/PIG.DENR", timelinePath: "data/replays/PIG.gj6.json" },
-  { id: "SEX", path: "data/replays/SEX.DENR", timelinePath: "data/replays/SEX.gj6.json" },
+  { id: "FMY", path: "assets/replays/FMY.DENR", timelinePath: "assets/replays/FMY.gj6.json" },
+  { id: "PIG", path: "assets/replays/PIG.DENR", timelinePath: "assets/replays/PIG.gj6.json" },
+  { id: "SEX", path: "assets/replays/SEX.DENR", timelinePath: "assets/replays/SEX.gj6.json" },
 ];
 
 export const PAD = Object.freeze({
