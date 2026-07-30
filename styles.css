@@ -193,6 +193,9 @@ select { width: 100%; min-width: 0; height: 38px; padding: 0 28px 0 9px; border:
 .direct-tech-heading span { display: block; font-family: ui-monospace, monospace; font-size: 20px; font-weight: 900; }
 .direct-tech-heading small { display: block; color: var(--muted); font-size: 9px; line-height: 1.35; letter-spacing: .04em; }
 .direct-tech-heading .tech-live-readout { margin-top: 3px; color: var(--acid); font-family: ui-monospace, monospace; letter-spacing: .08em; }
+.hotkey-badge { display: inline-block; margin-left: 6px; padding: 1px 5px; font-size: 10px; font-family: ui-monospace, monospace; font-weight: 700; background: var(--acid); color: #111; border-radius: 3px; vertical-align: middle; letter-spacing: .08em; }
+[data-hotkey] { position: relative; }
+[data-hotkey]::after { content: attr(data-hotkey); position: absolute; top: -7px; right: -3px; font-size: 7px; font-weight: 900; line-height: 11px; padding: 0 2px; background: var(--acid); color: #111; border-radius: 2px; pointer-events: none; z-index: 5; }
 .unavailable-tech-control { opacity: .58; }
 .unavailable-tech-control.replay-selected { opacity: 1; }
 .tech-unavailable { align-self: center; margin: 0; padding: 12px; color: var(--muted); font-family: ui-monospace, monospace; font-size: 9px; font-weight: 900; letter-spacing: .08em; text-align: center; }

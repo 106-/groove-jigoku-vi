@@ -65,7 +65,7 @@ class GrooveEngine {
     this.items = new Map(data.items.map((item) => [item.id, item]));
     this.ticksPerQuarter = data.meta.ticksPerQuarter;
     this.bpm = data.meta.bpm;
-    this.masterLevel = 0.25;
+    this.masterLevel = 0.5;
     this.playing = false;
     this.originTime = 0;
     this.originTick = 0;
@@ -2558,9 +2558,10 @@ function bindDirectTechButtons(selector, techName, configure, statusText) {
         }
       }
     };
+    button._setHeld = setHeld;
 
     button.addEventListener("pointerdown", (event) => {
-      if (event.button !== 0 || button.disabled) return;
+      if (event.button !== 0 || button.disabled || event.altKey) return;
       event.preventDefault();
       button.setPointerCapture(event.pointerId);
       setHeld(true);
@@ -2659,6 +2660,164 @@ bindDirectTechButtons(
   (button) => `FIL ${Number(button.dataset.fillSetting) + 1}-${Number(button.dataset.fillVariant) + 1} 発動中`,
 );
 
+// ---------- TECH hotkey ----------
+const HOTKEY_ROWS = [
+  ["y", "u", "i", "o"],
+  ["h", "j", "k", "l"],
+  ["n", "m", ",", "."],
+];
+const HOTKEY_LABELS = ["YUIO", "HJKL", "NM,."];
+const hotkeySlots = [null, null, null];
+const hotkeyKeyMap = new Map();
+
+function hotkeyButtonRow(button) {
+  const cls = [...button.classList].find((c) => c.endsWith("-trigger-button"));
+  if (!cls) return [];
+  const prefix = cls.replace("-trigger-button", "");
+  const settingKey = `${prefix}Setting`;
+  const all = [...document.querySelectorAll(`.${cls}`)];
+  if (button.dataset[settingKey] != null) {
+    const val = button.dataset[settingKey];
+    return all.filter((b) => b.dataset[settingKey] === val);
+  }
+  return all;
+}
+
+function rebuildHotkeyMap() {
+  hotkeyKeyMap.clear();
+  for (let s = 0; s < 3; s++) {
+    const slot = hotkeySlots[s];
+    if (!slot) continue;
+    HOTKEY_ROWS[s].forEach((key, i) => { hotkeyKeyMap.set(key, slot.buttons[i]); });
+  }
+}
+
+function clearHotkeySlot(index) {
+  const slot = hotkeySlots[index];
+  if (!slot) return;
+  for (const btn of slot.buttons) {
+    delete btn.dataset.hotkey;
+    if (btn._setHeld) btn._setHeld(false);
+  }
+  const badge = slot.control.querySelector(".hotkey-badge");
+  if (badge) badge.remove();
+  hotkeySlots[index] = null;
+  rebuildHotkeyMap();
+}
+
+function assignHotkeySlot(index, buttons, control) {
+  clearHotkeySlot(index);
+  const keys = HOTKEY_ROWS[index];
+  buttons.forEach((btn, i) => { btn.dataset.hotkey = keys[i].toUpperCase(); });
+  const heading = control.querySelector(".direct-tech-heading");
+  if (heading) {
+    const badge = document.createElement("kbd");
+    badge.className = "hotkey-badge";
+    badge.textContent = HOTKEY_LABELS[index];
+    heading.append(badge);
+  }
+  hotkeySlots[index] = { buttons, control };
+  rebuildHotkeyMap();
+}
+
+const HOTKEY_STORAGE_KEY = "groove-jigoku-vi-hotkeys-v1";
+const HOTKEY_DEFAULTS = [
+  { cls: "arp-trigger-button", setting: "1" },
+  { cls: "int-trigger-button", setting: null },
+  { cls: "fill-trigger-button", setting: "0" },
+];
+
+function hotkeySlotId(buttons) {
+  const btn = buttons[0];
+  const cls = [...btn.classList].find((c) => c.endsWith("-trigger-button"));
+  const prefix = cls.replace("-trigger-button", "");
+  const settingKey = `${prefix}Setting`;
+  const setting = btn.dataset[settingKey] ?? null;
+  return { cls, setting };
+}
+
+function findButtonRowById(id) {
+  const all = [...document.querySelectorAll(`.${id.cls}`)];
+  if (!all.length) return null;
+  if (id.setting != null) {
+    const prefix = id.cls.replace("-trigger-button", "");
+    const settingKey = `${prefix}Setting`;
+    const row = all.filter((b) => b.dataset[settingKey] === id.setting);
+    return row.length === 4 ? row : null;
+  }
+  return all.length === 4 ? all : null;
+}
+
+function saveHotkeys() {
+  const data = hotkeySlots.map((s) => s ? hotkeySlotId(s.buttons) : null);
+  try { localStorage.setItem(HOTKEY_STORAGE_KEY, JSON.stringify(data)); } catch { /* ignore */ }
+}
+
+function loadHotkeys() {
+  let data;
+  try { data = JSON.parse(localStorage.getItem(HOTKEY_STORAGE_KEY)); } catch { /* ignore */ }
+  if (!Array.isArray(data)) data = HOTKEY_DEFAULTS;
+  for (let i = 0; i < 3; i++) {
+    if (!data[i]) continue;
+    const row = findButtonRowById(data[i]);
+    if (row) assignHotkeySlot(i, row, row[0].closest(".tech-control"));
+  }
+}
+
+loadHotkeys();
+
+const hotkeyAssignKeys = new Set();
+window.addEventListener("keydown", (event) => {
+  const k = event.key.toLowerCase();
+  if (k === "y" || k === "h" || k === "n") hotkeyAssignKeys.add(k);
+}, true);
+window.addEventListener("keyup", (event) => {
+  hotkeyAssignKeys.delete(event.key.toLowerCase());
+}, true);
+
+$(".tech-buttons").addEventListener("click", (event) => {
+  if (!event.altKey) return;
+  const slotKey = ["y", "h", "n"].find((k) => hotkeyAssignKeys.has(k));
+  if (slotKey == null) return;
+  const button = event.target.closest('button[class*="-trigger-button"]');
+  if (!button) return;
+  event.preventDefault();
+  event.stopPropagation();
+
+  const row = hotkeyButtonRow(button);
+  if (row.length !== 4) return;
+  const control = button.closest(".tech-control");
+  const slot = ["y", "h", "n"].indexOf(slotKey);
+
+  const existing = hotkeySlots.findIndex((s) => s && s.buttons[0] === row[0]);
+  if (existing >= 0) clearHotkeySlot(existing);
+  if (existing === slot) return;
+  assignHotkeySlot(slot, row, control);
+  saveHotkeys();
+});
+
+window.addEventListener("keydown", (event) => {
+  if (event.defaultPrevented || event.repeat) return;
+  if (event.ctrlKey || event.metaKey || event.altKey) return;
+  const tag = document.activeElement?.tagName;
+  if (["SELECT", "INPUT", "TEXTAREA"].includes(tag)) return;
+  if (document.activeElement?.isContentEditable || event.isComposing) return;
+  if ($("#penFactoryDialog").open) return;
+  const btn = hotkeyKeyMap.get(event.key.toLowerCase());
+  if (btn && !btn.disabled && btn._setHeld) {
+    event.preventDefault();
+    btn._setHeld(true);
+  }
+}, true);
+
+window.addEventListener("keyup", (event) => {
+  const btn = hotkeyKeyMap.get(event.key.toLowerCase());
+  if (btn && btn._setHeld) {
+    event.preventDefault();
+    btn._setHeld(false);
+  }
+}, true);
+
 window.addEventListener("keydown", (event) => {
   if (event.defaultPrevented) return;
   if ($("#itemPickerDialog").open) return;
@@ -2674,10 +2833,11 @@ window.addEventListener("keydown", (event) => {
     toggleSlotEnabled(slotIndex);
   } else if (activeElement?.tagName === "BUTTON") {
     return;
-  } else if (event.code === "Space") {
+  } else if (event.key.toLowerCase() === "z") {
     event.preventDefault();
     togglePlay();
-  } else if (event.key === "0") {
+  } else if (event.code === "Space") {
+    event.preventDefault();
     engine.cue();
   } else if (/^[1-8]$/.test(event.key)) {
     switchSet(Number(event.key) - 1);
