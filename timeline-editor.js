@@ -65,10 +65,11 @@ export function createTimelineEditor(options) {
   const barLabelStep = () => (pxPerTick >= 0.4 ? 1 : pxPerTick >= 0.1 ? 4 : 8);
 
   function renderRowLabels() {
+    const labelRows = [{ key: "ruler", label: "" }, { key: "spacer", label: "" }, ...ROWS];
     rowLabels.replaceChildren(
-      ...[{ key: "ruler", label: "" }, ...ROWS].map((row) => {
+      ...labelRows.map((row) => {
         const label = document.createElement("div");
-        label.className = "editor-row-label";
+        label.className = row.key === "spacer" ? "editor-row-label editor-spacer" : "editor-row-label";
         label.textContent = row.label ?? "";
         return label;
       }),
@@ -94,6 +95,19 @@ export function createTimelineEditor(options) {
     board.style.setProperty("--bar-px", `${BAR_TICKS * pxPerTick}px`);
     board.style.setProperty("--beat-px", `${48 * pxPerTick}px`);
 
+    const grid = document.createElement("div");
+    grid.className = "editor-grid";
+    const cueBounds = [0, ...(timeline.cues ?? []).filter((c) => c > 0)].sort((a, b) => a - b);
+    for (let s = 0; s < cueBounds.length; s++) {
+      const start = cueBounds[s];
+      const end = cueBounds[s + 1] ?? duration;
+      const sec = document.createElement("div");
+      sec.className = "editor-grid-section";
+      sec.style.left = `${start * pxPerTick}px`;
+      sec.style.width = `${(end - start) * pxPerTick}px`;
+      grid.append(sec);
+    }
+
     const ruler = document.createElement("div");
     ruler.className = "editor-ruler editor-track";
     ruler.dataset.row = "ruler";
@@ -106,7 +120,9 @@ export function createTimelineEditor(options) {
       ruler.append(mark);
     }
 
-    const rows = [ruler];
+    const spacer = document.createElement("div");
+    spacer.className = "editor-track editor-spacer";
+    const rows = [ruler, spacer];
     for (const row of ROWS) {
       const track = document.createElement("div");
       track.className = "editor-track editor-row";
@@ -163,7 +179,7 @@ export function createTimelineEditor(options) {
     playhead.id = "editorPlayhead";
     playhead.style.left = "-9999px";
 
-    board.replaceChildren(...rows, cursor, playhead);
+    board.replaceChildren(grid, ...rows, cursor, playhead);
     renderRowLabels();
     $("#editorTitle").textContent = timeline
       ? `${timeline.meta.title ?? timeline.meta.id ?? ""} · ${Math.ceil(timeline.meta.durationTicks / BAR_TICKS)}小節`
