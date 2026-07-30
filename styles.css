@@ -240,12 +240,12 @@ select { width: 100%; min-width: 0; height: 38px; padding: 0 28px 0 9px; border:
 .editor-section #editorCollapse { background: var(--panel-hi); border: 1px solid var(--line); color: var(--ink); padding: 6px 14px; border-radius: 6px; cursor: pointer; }
 .editor-body { margin-top: 12px; display: grid; gap: 10px; }
 .editor-body[hidden] { display: none; }
-.editor-toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
-.editor-toolbar button { background: var(--panel-hi); border: 1px solid var(--line); color: var(--ink); padding: 6px 10px; border-radius: 6px; cursor: pointer; font-size: 12px; }
-.editor-toolbar button:hover { border-color: var(--acid); }
+.editor-toolbar { display: flex; flex-direction: column; gap: 4px; }
+.editor-toolbar-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.editor-toolbar button, .editor-toolbar select { height: 28px; box-sizing: border-box; background: var(--panel-hi); border: 1px solid var(--line); color: var(--ink); padding: 0 10px; border-radius: 6px; cursor: pointer; font-size: 12px; font-family: inherit; }
+.editor-toolbar button:hover, .editor-toolbar select:hover { border-color: var(--acid); }
 .editor-toolbar #editorArmRecord.armed { color: #fff; background: #a02020; border-color: #ff6b2b; }
-.editor-snap-label { font-size: 11px; color: var(--muted); display: inline-flex; gap: 6px; align-items: center; }
-.editor-snap-label select { background: var(--panel-hi); color: var(--ink); border: 1px solid var(--line); border-radius: 4px; padding: 3px; }
+.editor-snap-label { font-size: 12px; color: var(--muted); display: inline-flex; gap: 6px; align-items: center; }
 .editor-title { margin-left: auto; font-size: 11px; color: var(--cyan); font-family: ui-monospace, monospace; }
 .editor-layout { display: flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: #131311; }
 .editor-row-labels { flex: 0 0 52px; border-right: 1px solid var(--line); background: var(--panel); }

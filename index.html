@@ -68,30 +68,35 @@
       </div>
       <div id="editorBody" class="editor-body" hidden>
         <div class="editor-toolbar">
-          <label class="editor-snap-label">PRESET
-            <select id="editorPresetSelect"></select>
-          </label>
-          <button id="editorPresetLoad" type="button" title="調整済みディスクリプレイをタイムラインとして読み込み">プリセット読込</button>
-          <button id="editorLoadReplay" type="button" title="選択中プリセットの原本DENRを変換して読み込み（調整前の状態）">DENR原本</button>
-          <button id="editorPlayCursor" type="button" title="カーソル位置から試聴">▶ カーソルから</button>
-          <button id="editorStopButton" type="button">■ 停止</button>
-          <button id="editorArmRecord" type="button" title="次のPLAYで演奏の収録を開始">● REC ARM</button>
-          <label class="editor-snap-label">SNAP
-            <select id="editorSnap">
-              <option value="0">なし</option>
-              <option value="6">6</option>
-              <option value="12">12</option>
-              <option value="24" selected>24</option>
-              <option value="48">48 (拍)</option>
-              <option value="192">192 (小節)</option>
-            </select>
-          </label>
-          <button id="editorZoomOut" type="button" aria-label="ズームアウト">−</button>
-          <button id="editorZoomIn" type="button" aria-label="ズームイン">＋</button>
-          <button id="editorExport" type="button">書き出し</button>
-          <button id="editorImport" type="button">読み込み</button>
-          <input id="editorImportFile" type="file" accept=".json,.denr,.DENR,application/json" hidden>
-          <span id="editorTitle" class="editor-title"></span>
+          <div class="editor-toolbar-row">
+            <label class="editor-snap-label">PRESET
+              <select id="editorPresetSelect"></select>
+            </label>
+            <button id="editorPresetLoad" type="button" title="調整済みディスクリプレイをタイムラインとして読み込み">プリセット読込</button>
+            <span id="editorTitle" class="editor-title"></span>
+          </div>
+          <div class="editor-toolbar-row">
+            <button id="editorPlayCursor" type="button" title="カーソル位置から試聴">▶ カーソルから</button>
+            <button id="editorStopButton" type="button">■ 停止</button>
+            <button id="editorArmRecord" type="button" title="次のPLAYで演奏の収録を開始">● REC ARM</button>
+            <button id="editorExport" type="button">書き出し</button>
+            <button id="editorImport" type="button">読み込み</button>
+            <input id="editorImportFile" type="file" accept=".json,.denr,.DENR,application/json" hidden>
+            <button id="editorLoadReplay" type="button" title="DENRファイルを選んで変換読み込み">DENR読込</button>
+            <input id="editorDenrFile" type="file" accept=".denr,.DENR" hidden>
+            <label class="editor-snap-label">SNAP
+              <select id="editorSnap">
+                <option value="0">なし</option>
+                <option value="6">6</option>
+                <option value="12">12</option>
+                <option value="24" selected>24</option>
+                <option value="48">48 (拍)</option>
+                <option value="192">192 (小節)</option>
+              </select>
+            </label>
+            <button id="editorZoomOut" type="button" aria-label="ズームアウト">-</button>
+            <button id="editorZoomIn" type="button" aria-label="ズームイン">+</button>
+          </div>
         </div>
         <div class="editor-layout">
           <div class="editor-row-labels" id="editorRowLabels"></div>

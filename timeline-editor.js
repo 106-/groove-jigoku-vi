@@ -509,11 +509,14 @@ export function createTimelineEditor(options) {
     }
   });
 
-  $("#editorLoadReplay").addEventListener("click", async () => {
+  $("#editorLoadReplay").addEventListener("click", () => $("#editorDenrFile").click());
+  $("#editorDenrFile").addEventListener("change", async (event) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
     try {
-      const loaded = await getOriginalDenrTimeline(presetSelect.value);
-      load(deepCopy(loaded));
-      setStatus(`${presetSelect.value} の原本DENRを変換して読み込みました`, false);
+      load(convertDenrBuffer(await file.arrayBuffer(), file.name.replace(/\.denr$/i, "")));
+      setStatus(`DENRを変換して読み込みました: ${file.name}`, false);
     } catch (error) {
       console.error(error);
       setStatus(`取込エラー: ${error.message}`, false);
