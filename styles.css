@@ -67,7 +67,7 @@ input[type="range"] { width: 100%; accent-color: var(--acid); }
 .replay-running .set-button { transition: filter 90ms ease, box-shadow 180ms ease; }
 .replay-running .tech-control { transition: border-color 160ms ease, box-shadow 180ms ease, transform 180ms cubic-bezier(.2, .8, .2, 1); }
 .replay-running .slot-card, .replay-running .tech-control { cursor: default; }
-.replay-running button:disabled, .replay-running select:disabled { cursor: default; opacity: .76; }
+.replay-running button:disabled, .replay-running select:disabled { cursor: default; opacity: .4; filter: saturate(0); }
 
 .set-section, .sequence-section, .tech-section { margin-top: 18px; padding: 16px; }
 .section-heading { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; margin-bottom: 14px; }

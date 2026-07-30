@@ -65,7 +65,7 @@ class GrooveEngine {
     this.items = new Map(data.items.map((item) => [item.id, item]));
     this.ticksPerQuarter = data.meta.ticksPerQuarter;
     this.bpm = data.meta.bpm;
-    this.masterLevel = 0.78;
+    this.masterLevel = 0.25;
     this.playing = false;
     this.originTime = 0;
     this.originTick = 0;
@@ -1562,8 +1562,6 @@ const timelinePlayer = createTimelinePlayer(engine, {
   },
   lockUi: (locked) => {
     setReplayUiLocked(locked);
-    $("#playButton").textContent = locked ? "■ STOP" : "▶ PLAY";
-    $("#playButton").classList.toggle("stop", locked);
   },
   onEnd: (message) => {
     renderedSequenceKey = "";
@@ -2196,6 +2194,12 @@ function setReplayUiLocked(locked) {
   $$(".set-section button, .set-section select, .slots-section button, .slots-section select, .tech-section button")
     .forEach((control) => { control.disabled = locked; });
   $$(".replay-choice").forEach((button) => { button.disabled = locked; });
+  $("#cueButton").disabled = locked;
+  $("#playButton").disabled = locked;
+  $$(".editor-toolbar button, .editor-toolbar select").forEach((control) => {
+    if (control.id === "editorStopButton" || control.id === "editorZoomOut" || control.id === "editorZoomIn") return;
+    control.disabled = locked;
+  });
 }
 
 function renderReplayIndicators() {
@@ -2481,7 +2485,7 @@ $$('.tech-button').forEach((button) => {
   };
 
   button.addEventListener("pointerdown", (event) => {
-    if (event.button !== 0) return;
+    if (event.button !== 0 || button.disabled) return;
     event.preventDefault();
     button.setPointerCapture(event.pointerId);
     setHeld(true);
@@ -2556,7 +2560,7 @@ function bindDirectTechButtons(selector, techName, configure, statusText) {
     };
 
     button.addEventListener("pointerdown", (event) => {
-      if (event.button !== 0) return;
+      if (event.button !== 0 || button.disabled) return;
       event.preventDefault();
       button.setPointerCapture(event.pointerId);
       setHeld(true);
