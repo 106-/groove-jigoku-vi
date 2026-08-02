@@ -5,7 +5,9 @@
 
 ## 使ってみる
 
-こちらからアクセスできます: https://106-.github.io/groove-jigoku-vi/
+これらからアクセスできます:
+- https://groove-jigoku-vi.vercel.app/
+- https://106-.github.io/groove-jigoku-vi/
 
 ## できること
 
