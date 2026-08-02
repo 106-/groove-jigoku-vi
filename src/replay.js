@@ -1,9 +1,7 @@
-// timelinePath is the bundled, hand-adjusted gj6-timeline used for playback;
-// path keeps the original DENR pad stream (conversion source / reference).
 export const REPLAY_DEFINITIONS = [
-  { id: "FMY", path: "assets/replays/FMY.DENR", timelinePath: "assets/replays/FMY.gj6.json" },
-  { id: "PIG", path: "assets/replays/PIG.DENR", timelinePath: "assets/replays/PIG.gj6.json" },
-  { id: "SEX", path: "assets/replays/SEX.DENR", timelinePath: "assets/replays/SEX.gj6.json" },
+  { id: "FMY", timelinePath: "assets/replays/FMY.gj6.json" },
+  { id: "PIG", timelinePath: "assets/replays/PIG.gj6.json" },
+  { id: "SEX", timelinePath: "assets/replays/SEX.gj6.json" },
 ];
 
 export const PAD = Object.freeze({
@@ -177,6 +175,31 @@ function parseInputStream(bytes, view) {
   }
 
   return { byteLength, records, frames, frameCount, durationSeconds: frameCount / REPLAY_FPS };
+}
+
+export function parseMcd(arrayBuffer) {
+  const bytes = new Uint8Array(arrayBuffer);
+  if (bytes[0] !== 0x4d || bytes[1] !== 0x43) throw new Error("MCDヘッダがありません");
+
+  const entries = [];
+  for (let slot = 0; slot < 15; slot++) {
+    const dir = 0x80 + slot * 0x80;
+    if (bytes[dir] !== 0x51) continue;
+    let end = dir + 0x0a;
+    while (end < dir + 0x2a && bytes[end] !== 0) end++;
+    const filename = new TextDecoder("ascii").decode(bytes.subarray(dir + 0x0a, end));
+    const match = filename.match(/DENR(.+)$/);
+    if (!match) continue;
+    const dataOffset = (slot + 1) * 0x2000;
+    const title = readFixedText(bytes, dataOffset + 4, 64);
+    entries.push({
+      id: match[1],
+      title,
+      filename,
+      data: arrayBuffer.slice(dataOffset, dataOffset + HEADER_SIZE),
+    });
+  }
+  return entries;
 }
 
 export function parseReplay(arrayBuffer, catalog, fallbackId = "REPLAY") {

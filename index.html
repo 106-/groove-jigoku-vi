@@ -5,6 +5,13 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark">
+  <meta name="description" content="グルーヴ地獄VのDJシーケンサー機能をブラウザで再現。DJプレイ・タイムライン編集機能・ボールペン組み立て作業に対応。">
+  <meta name="keywords" content="グルーヴ地獄V, 電気グルーヴ, Groove Jigoku V, ボールペンコウジョウ">
+  <meta property="og:title" content="GROOVE JIGOKU VI">
+  <meta property="og:description" content="グルーヴ地獄VのDJシーケンサーをブラウザで再現。DJプレイ・タイムライン編集機能・ボールペン組み立て作業に対応。">
+  <meta property="og:type" content="website">
+  <meta property="og:image" content="header.svg">
+  <meta name="twitter:card" content="summary">
   <title>GROOVE JIGOKU VI</title>
   <link rel="stylesheet" href="styles.css">
 </head>
@@ -82,9 +89,9 @@
             <button id="editorArmRecord" type="button" title="次のPLAYで演奏の収録を開始">● REC ARM</button>
             <button id="editorExport" type="button">書き出し</button>
             <button id="editorImport" type="button">読み込み</button>
-            <input id="editorImportFile" type="file" accept=".json,.denr,.DENR,application/json" hidden>
-            <button id="editorLoadReplay" type="button" title="DENRファイルを選んで変換読み込み">DENR読込</button>
-            <input id="editorDenrFile" type="file" accept=".denr,.DENR" hidden>
+            <input id="editorImportFile" type="file" accept=".json,.denr,.DENR,.mcd,.MCD,application/json" hidden>
+            <button id="editorLoadReplay" type="button" title="メモリーカード (.mcd) / DENRファイルを変換読み込み">MCD読込</button>
+            <input id="editorDenrFile" type="file" accept=".denr,.DENR,.mcd,.MCD" hidden>
             <label class="editor-snap-label">SNAP
               <select id="editorSnap">
                 <option value="0">なし</option>

@@ -4,6 +4,7 @@
 // arm.  The editor starts empty and resets on reload; persistence is only
 // the explicit export/import.
 import { BAR_TICKS, LANE_KEYS, REPLAY_TECHS, SET_NAMES } from "./constants.js";
+import { parseMcd } from "./replay.js";
 import { normalizeTimeline, validateTimeline } from "./timeline.js";
 
 const ZOOMS = [0.05, 0.1, 0.2, 0.4, 0.8, 1.6];
@@ -21,7 +22,7 @@ const $ = (selector, root = document) => root.querySelector(selector);
 const deepCopy = (value) => JSON.parse(JSON.stringify(value));
 
 export function createTimelineEditor(options) {
-  const { player, recorder, itemMap, presetIds, getPresetTimeline, getOriginalDenrTimeline, convertDenrBuffer, onLoaded, setStatus } = options;
+  const { player, recorder, itemMap, presetIds, getPresetTimeline, convertDenrBuffer, onLoaded, setStatus } = options;
 
   const body = $("#editorBody");
   const board = $("#editorBoard");
@@ -509,12 +510,51 @@ export function createTimelineEditor(options) {
     }
   });
 
+  function pickMcdEntry(entries) {
+    if (entries.length === 1) return Promise.resolve(entries[0]);
+    return new Promise((resolve) => {
+      const dialog = document.createElement("dialog");
+      dialog.className = "mcd-picker";
+      const heading = document.createElement("p");
+      heading.textContent = "読み込むリプレイを選択";
+      dialog.appendChild(heading);
+      for (const entry of entries) {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.textContent = entry.title || entry.id;
+        btn.addEventListener("click", () => { dialog.close(); resolve(entry); });
+        dialog.appendChild(btn);
+      }
+      const cancel = document.createElement("button");
+      cancel.type = "button";
+      cancel.textContent = "キャンセル";
+      cancel.addEventListener("click", () => { dialog.close(); resolve(null); });
+      dialog.appendChild(cancel);
+      document.body.appendChild(dialog);
+      dialog.addEventListener("close", () => { dialog.remove(); resolve(null); });
+      dialog.showModal();
+    });
+  }
+
+  async function loadMcdFile(arrayBuffer, fileName) {
+    const entries = parseMcd(arrayBuffer);
+    if (entries.length === 0) throw new Error("リプレイデータが見つかりません");
+    const entry = await pickMcdEntry(entries);
+    if (!entry) return;
+    load(convertDenrBuffer(entry.data, entry.id));
+    setStatus(`MCD → ${entry.id} を変換して読み込みました: ${fileName}`, false);
+  }
+
   $("#editorLoadReplay").addEventListener("click", () => $("#editorDenrFile").click());
   $("#editorDenrFile").addEventListener("change", async (event) => {
     const file = event.target.files?.[0];
     event.target.value = "";
     if (!file) return;
     try {
+      if (/\.mcd$/i.test(file.name)) {
+        await loadMcdFile(await file.arrayBuffer(), file.name);
+        return;
+      }
       load(convertDenrBuffer(await file.arrayBuffer(), file.name.replace(/\.denr$/i, "")));
       setStatus(`DENRを変換して読み込みました: ${file.name}`, false);
     } catch (error) {
@@ -556,8 +596,11 @@ export function createTimelineEditor(options) {
     event.target.value = "";
     if (!file) return;
     try {
+      if (/\.mcd$/i.test(file.name)) {
+        await loadMcdFile(await file.arrayBuffer(), file.name);
+        return;
+      }
       if (/\.denr$/i.test(file.name)) {
-        // A raw pad-stream save file: run it through the DENR converter.
         load(convertDenrBuffer(await file.arrayBuffer(), file.name.replace(/\.denr$/i, "")));
         setStatus(`DENRを変換して読み込みました: ${file.name}`, false);
         return;

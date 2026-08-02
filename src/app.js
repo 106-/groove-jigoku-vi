@@ -2227,14 +2227,7 @@ function renderReplayIndicators() {
   }
 }
 
-async function loadReplayDefinition(definition) {
-  const response = await fetch(definition.path);
-  if (!response.ok) throw new Error(`${definition.path}: HTTP ${response.status}`);
-  return parseReplay(await response.arrayBuffer(), data, definition.id);
-}
-
 const bundledTimelines = new Map();
-const convertedTimelines = new Map();
 
 // Playback uses the bundled, hand-adjusted gj6-timeline files.
 async function loadReplayTimeline(definition) {
@@ -2250,19 +2243,6 @@ async function loadReplayTimeline(definition) {
     });
   }
   return bundledTimelines.get(definition.id);
-}
-
-// The original DENR pad stream stays available as a conversion source
-// (also used for user save files imported through the editor).
-async function loadConvertedReplayTimeline(definition) {
-  if (!convertedTimelines.has(definition.id)) {
-    const replay = await loadReplayDefinition(definition);
-    convertedTimelines.set(definition.id, {
-      replayTitle: replay.title,
-      timeline: convertReplayToTimeline(replay),
-    });
-  }
-  return convertedTimelines.get(definition.id);
 }
 
 async function togglePlay() {
@@ -2320,11 +2300,6 @@ const timelineEditor = createTimelineEditor({
   getPresetTimeline: async (id) => {
     const definition = REPLAY_DEFINITIONS.find((candidate) => candidate.id === id);
     const { timeline } = await loadReplayTimeline(definition);
-    return timeline;
-  },
-  getOriginalDenrTimeline: async (id) => {
-    const definition = REPLAY_DEFINITIONS.find((candidate) => candidate.id === id);
-    const { timeline } = await loadConvertedReplayTimeline(definition);
     return timeline;
   },
   convertDenrBuffer: (arrayBuffer, name) => (

@@ -293,6 +293,14 @@ select { width: 100%; min-width: 0; height: 38px; padding: 0 28px 0 9px; border:
 .job-ad .job-title { display: block; font-weight: bold; font-size: 12px; letter-spacing: .04em; }
 .job-ad .job-desc { display: block; margin: 3px 0 5px; color: #6b5d43; font-size: 9px; line-height: 1.5; }
 .job-ad .job-money { display: block; padding-top: 4px; border-top: 1px dashed #c9b88a; color: #1a6b2a; font-size: 10px; font-weight: bold; font-variant-numeric: tabular-nums; }
+/* ---- MCD picker ---- */
+.mcd-picker { width: min(320px, calc(100% - 32px)); padding: 16px; border: 1px solid var(--line); background: var(--panel); color: var(--ink); }
+.mcd-picker::backdrop { background: #050504d9; backdrop-filter: blur(3px); }
+.mcd-picker p { margin: 0 0 10px; font-weight: bold; font-size: 13px; color: var(--acid); }
+.mcd-picker button { display: block; width: 100%; margin-bottom: 6px; padding: 8px 12px; border: 1px solid var(--line); background: var(--panel-hi); color: var(--ink); font-size: 13px; cursor: pointer; }
+.mcd-picker button:hover { border-color: var(--acid); color: var(--acid); }
+.mcd-picker button:last-child { margin-top: 10px; color: var(--muted); border-color: transparent; background: transparent; }
+
 .pen-factory-dialog { width: min(680px, calc(100% - 32px)); padding: 0; border: 1px solid var(--line); background: var(--panel); color: var(--ink); }
 .pen-factory-dialog::backdrop { background: #050504d9; backdrop-filter: blur(3px); }
 .factory-shell { padding: 16px; }
