@@ -22,7 +22,7 @@ const $ = (selector, root = document) => root.querySelector(selector);
 const deepCopy = (value) => JSON.parse(JSON.stringify(value));
 
 export function createTimelineEditor(options) {
-  const { player, recorder, itemMap, presetIds, getPresetTimeline, convertDenrBuffer, onLoaded, setStatus } = options;
+  const { player, recorder, capture, itemMap, presetIds, getPresetTimeline, convertDenrBuffer, onLoaded, setStatus } = options;
 
   const body = $("#editorBody");
   const board = $("#editorBoard");
@@ -474,11 +474,70 @@ export function createTimelineEditor(options) {
 
   $("#editorPlayCursor").addEventListener("click", async () => {
     await audition(cursorTick);
-    if (player.running) setStatus("タイムライン試聴中", true);
+    if (!player.running) return;
+    renderCapture();
+    setStatus(
+      capture.recording
+        ? "タイムライン試聴中（音声を録音中・タブは表示したままに）"
+        : "タイムライン試聴中",
+      true,
+    );
   });
 
   $("#editorStopButton").addEventListener("click", () => {
     if (player.running) player.stop("停止しました");
+  });
+
+  // ---------- audio bounce ----------
+  const armAudioButton = $("#editorArmAudio");
+  const saveAudioButton = $("#editorSaveAudio");
+
+  function renderCapture() {
+    armAudioButton.classList.toggle("armed", capture.armed);
+    armAudioButton.classList.toggle("recording", capture.recording);
+    armAudioButton.textContent = capture.recording ? "⏺ 録音中" : "⏺ 音声REC";
+    armAudioButton.disabled = !capture.supported || player.running;
+    const result = capture.lastResult;
+    saveAudioButton.disabled = !result;
+    saveAudioButton.textContent = result
+      ? `音声DL (${result.seconds.toFixed(1)}秒)`
+      : "音声DL";
+  }
+
+  if (!capture.supported) {
+    armAudioButton.title = "このブラウザは音声録音 (MediaRecorder) に対応していません";
+  }
+
+  capture.onFinished = (result) => {
+    renderCapture();
+    setStatus(
+      `音声を録音しました: ${result.seconds.toFixed(1)}秒 / ${result.label}。「音声DL」で保存できます`,
+      false,
+    );
+  };
+
+  armAudioButton.addEventListener("click", () => {
+    if (!capture.supported) {
+      setStatus("このブラウザは音声録音に対応していません", false);
+      return;
+    }
+    if (capture.recording) {
+      setStatus("録音中です。■ 停止か再生終了で確定します", true);
+      return;
+    }
+    capture.setArmed(!capture.armed);
+    renderCapture();
+    setStatus(
+      capture.armed
+        ? "音声REC待機: ▶ で再生すると録音します。タブは表示したままに"
+        : "音声RECを解除しました",
+      false,
+    );
+  });
+
+  saveAudioButton.addEventListener("click", () => {
+    if (!capture.save()) return;
+    setStatus(`${capture.lastResult.fileName} を保存しました`, false);
   });
 
   $("#editorArmRecord").addEventListener("click", () => {
@@ -631,7 +690,8 @@ export function createTimelineEditor(options) {
   }
 
   renderRowLabels();
+  renderCapture();
   trackPlayhead();
 
-  return { load, audition, get timeline() { return timeline; } };
+  return { load, audition, refreshCapture: renderCapture, get timeline() { return timeline; } };
 }

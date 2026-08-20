@@ -16,6 +16,7 @@ import {
 } from "./constants.js";
 import { convertReplayToTimeline } from "./timeline-convert.js";
 import { timelineSetToSlots, validateTimeline } from "./timeline.js";
+import { createAudioCapture } from "./audio-capture.js";
 import { createTimelinePlayer } from "./timeline-player.js";
 import { createTimelineRecorder } from "./timeline-recorder.js";
 import { createTimelineEditor } from "./timeline-editor.js";
@@ -1554,6 +1555,7 @@ const engine = new GrooveEngine(data, updatePosition);
 engine.getTracks = getActiveTracks;
 
 const LANE_SLOT_INDEX = [0, 1, 2, 2, 3, 3];
+const audioCapture = createAudioCapture(engine);
 const timelinePlayer = createTimelinePlayer(engine, {
   setStatus: (message) => setStatus(message, false),
   applyBpm: (bpm) => {
@@ -1574,6 +1576,20 @@ const timelinePlayer = createTimelinePlayer(engine, {
     renderedSequenceKey = "";
     renderSlots();
     renderReplayIndicators();
+  },
+  onCaptureStart: async (timeline) => {
+    try {
+      await audioCapture.begin(timeline);
+    } catch (error) {
+      console.error(error);
+      setStatus(`音声録音を開始できません: ${error.message}`, false);
+    }
+  },
+  onCaptureStop: () => {
+    audioCapture.finish().catch((error) => {
+      console.error(error);
+      setStatus(`音声録音エラー: ${error.message}`, false);
+    });
   },
 });
 
@@ -2198,8 +2214,11 @@ function setReplayUiLocked(locked) {
   $("#playButton").disabled = locked;
   $$(".editor-toolbar button, .editor-toolbar select").forEach((control) => {
     if (control.id === "editorStopButton" || control.id === "editorZoomOut" || control.id === "editorZoomIn") return;
+    // The audio-bounce buttons own their own disabled state.
+    if (control.id === "editorArmAudio" || control.id === "editorSaveAudio") return;
     control.disabled = locked;
   });
+  timelineEditor.refreshCapture();
 }
 
 function renderReplayIndicators() {
@@ -2294,6 +2313,7 @@ async function togglePlay() {
 const timelineEditor = createTimelineEditor({
   player: timelinePlayer,
   recorder: timelineRecorder,
+  capture: audioCapture,
   itemMap,
   setStatus,
   presetIds: REPLAY_DEFINITIONS.map((definition) => definition.id),

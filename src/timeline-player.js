@@ -183,6 +183,7 @@ export function createTimelinePlayer(engine, ui) {
     if (engine.playing) engine.stop();
     session = null;
     ui.lockUi(false);
+    ui.onCaptureStop?.();
   }
 
   function finish() {
@@ -235,6 +236,8 @@ export function createTimelinePlayer(engine, ui) {
     };
     ui.lockUi(true);
     ui.onStateChange();
+    // Arm the audio bounce before the clock starts so nothing is clipped.
+    await ui.onCaptureStart?.(timeline);
     await engine.start();
     session.offset = startTick - state.musicalTick;
     session.startWall = engine.originTime;

@@ -247,7 +247,11 @@ select { width: 100%; min-width: 0; height: 38px; padding: 0 28px 0 9px; border:
 .editor-toolbar-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .editor-toolbar button, .editor-toolbar select { height: 28px; box-sizing: border-box; background: var(--panel-hi); border: 1px solid var(--line); color: var(--ink); padding: 0 10px; border-radius: 6px; cursor: pointer; font-size: 12px; font-family: inherit; }
 .editor-toolbar button:hover, .editor-toolbar select:hover { border-color: var(--acid); }
-.editor-toolbar #editorArmRecord.armed { color: #fff; background: #a02020; border-color: #ff6b2b; }
+.editor-toolbar #editorArmRecord.armed, .editor-toolbar #editorArmAudio.armed { color: #fff; background: #a02020; border-color: #ff6b2b; }
+.editor-toolbar #editorArmAudio.recording { color: #fff; background: #c23a10; border-color: #ff6b2b; animation: rec-pulse 1.2s ease-in-out infinite; }
+.editor-toolbar button:disabled { cursor: default; opacity: .45; border-color: var(--line); }
+.editor-toolbar button:disabled:hover { border-color: var(--line); }
+@keyframes rec-pulse { 50% { opacity: .55; } }
 .editor-snap-label { font-size: 12px; color: var(--muted); display: inline-flex; gap: 6px; align-items: center; }
 .editor-title { margin-left: auto; font-size: 11px; color: var(--cyan); font-family: ui-monospace, monospace; }
 .editor-layout { display: flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: #131311; }
